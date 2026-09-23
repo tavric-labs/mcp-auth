@@ -1,9 +1,30 @@
 # Architecture
 
-`mcp-auth` keeps protocol authorization, resource-server enforcement, and
-provider-specific behavior behind explicit boundaries. The authorization server and
-SDKs can be deployed independently; neither requires MCP tool handlers to know which
+`mcp-auth` is an OAuth 2.1 authorization broker for MCP. It keeps protocol
+authorization, resource-server enforcement, and provider-specific identity
+behavior behind explicit boundaries. The authorization server and SDKs can be
+deployed independently; neither requires MCP tool handlers to know which
 identity provider authenticated the user.
+
+## Standards and roles
+
+The system has three distinct roles. Keeping them distinct is an important MCP
+security boundary, not just an implementation detail:
+
+| Role | `mcp-auth` responsibility | Not its responsibility |
+| --- | --- | --- |
+| Authorization server | Issues MCP access tokens, publishes metadata, handles consent, client registration/Client ID Metadata Documents, and token lifecycle | User directory, MFA, and enterprise sign-in policy |
+| Resource server | The SDKs publish RFC 9728 metadata, emit bearer challenges, and verify tokens; the application applies per-tool authorization | Issuing MCP tokens or accepting a token for a different audience |
+| Upstream identity provider | Connected through OIDC or OAuth 2.0 to authenticate the user and, where configured, obtain a downstream credential | Being exposed directly to MCP clients |
+
+The supported MCP authorization profile is OAuth 2.1 Authorization Code with
+mandatory PKCE `S256`, RFC 8414 Authorization Server Metadata, RFC 9728
+Protected Resource Metadata, RFC 9207 authorization-response `iss`, resource
+indicators/audience binding, and Client ID Metadata Documents. Dynamic Client
+Registration remains available for compatible clients, although MCP now prefers
+Client ID Metadata Documents. This describes the roles this project implements;
+it does not claim to implement every OAuth extension or every responsibility
+assigned by the MCP specification to clients and resource servers.
 
 ## Components
 
