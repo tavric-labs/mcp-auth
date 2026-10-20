@@ -178,14 +178,14 @@ func TestLDAPFailureModes(t *testing.T) {
 	t.Run("directory unreachable is not a wrong password", func(t *testing.T) {
 		directory := &fakeDirectory{dialErr: errors.New("connection refused")}
 		_, err := newSearchMethod(t, directory).Authenticate(context.Background(), IdentityRequest{}, attempt("alice", "pw"))
-		if err == nil || errors.Is(err, ErrInvalidCredentials) {
-			t.Fatalf("err = %v, want a non-credential error", err)
+		if !errors.Is(err, ErrMethodUnavailable) || errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("err = %v, want an outage that is not a credential error", err)
 		}
 	})
 	t.Run("service account rejected is not a wrong password", func(t *testing.T) {
 		directory := &fakeDirectory{passwords: map[string]string{}}
 		_, err := newSearchMethod(t, directory).Authenticate(context.Background(), IdentityRequest{}, attempt("alice", "pw"))
-		if err == nil || errors.Is(err, ErrInvalidCredentials) {
+		if !errors.Is(err, ErrMethodUnavailable) || errors.Is(err, ErrInvalidCredentials) {
 			t.Fatalf("err = %v, a broken service account must not look like a user's mistake", err)
 		}
 	})
@@ -195,7 +195,14 @@ func TestLDAPFailureModes(t *testing.T) {
 			bindErrFor: map[string]error{"uid=alice,ou=people,dc=example,dc=com": ldap.NewError(ldap.LDAPResultBusy, errors.New("busy"))},
 		}
 		_, err := newSearchMethod(t, directory).Authenticate(context.Background(), IdentityRequest{}, attempt("alice", "pw"))
-		if err == nil || errors.Is(err, ErrInvalidCredentials) {
+		if !errors.Is(err, ErrMethodUnavailable) || errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("search failure is an outage", func(t *testing.T) {
+		directory := &fakeDirectory{searchErr: errors.New("timeout"), passwords: serviceOK}
+		_, err := newSearchMethod(t, directory).Authenticate(context.Background(), IdentityRequest{}, attempt("alice", "pw"))
+		if !errors.Is(err, ErrMethodUnavailable) {
 			t.Fatalf("err = %v", err)
 		}
 	})
@@ -203,8 +210,10 @@ func TestLDAPFailureModes(t *testing.T) {
 		bare := ldap.NewEntry("uid=alice,ou=people,dc=example,dc=com", map[string][]string{"mail": {"a@example.com"}})
 		directory := &fakeDirectory{entries: []*ldap.Entry{bare}, passwords: map[string]string{"cn=svc,dc=example,dc=com": "service-secret", bare.DN: "pw"}}
 		_, err := newSearchMethod(t, directory).Authenticate(context.Background(), IdentityRequest{}, attempt("alice", "pw"))
-		if err == nil || errors.Is(err, ErrInvalidCredentials) {
-			t.Fatalf("err = %v, a missing subject must fail closed", err)
+		// This happens after the password was accepted, so it must be neither
+		// an outage nor a wrong password: the caller counts it like a failure.
+		if err == nil || errors.Is(err, ErrInvalidCredentials) || errors.Is(err, ErrMethodUnavailable) {
+			t.Fatalf("err = %v, a missing subject must fail closed and not look like an outage", err)
 		}
 	})
 }
@@ -267,8 +276,9 @@ func TestLDAPDirectBindSubjectIsTheDirectorysDNNotTheTypedOne(t *testing.T) {
 func TestLDAPDirectBindFailsClosedWhenTheEntryCannotBeRead(t *testing.T) {
 	method, directory := directBindMethod(t, "dn")
 	directory.searchErr = errors.New("insufficient access")
-	if _, err := method.Authenticate(context.Background(), IdentityRequest{}, attempt("alice", "pw")); err == nil || errors.Is(err, ErrInvalidCredentials) {
-		t.Fatalf("err = %v, want a non-credential failure", err)
+	// The bind succeeded, so this failure came after the password was checked.
+	if _, err := method.Authenticate(context.Background(), IdentityRequest{}, attempt("alice", "pw")); err == nil || errors.Is(err, ErrInvalidCredentials) || errors.Is(err, ErrMethodUnavailable) {
+		t.Fatalf("err = %v, want a failure that is neither a wrong password nor an outage", err)
 	}
 	directory.searchErr = nil
 	directory.entries = nil
@@ -336,8 +346,8 @@ func TestLDAPAttemptsAreBoundedAndHonourCancellation(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := method.Authenticate(ctx, IdentityRequest{}, attempt("alice", "pw")); !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want the cancellation while waiting for a slot", err)
+	if _, err := method.Authenticate(ctx, IdentityRequest{}, attempt("alice", "pw")); !errors.Is(err, ErrMethodUnavailable) {
+		t.Fatalf("err = %v, want an outage while waiting for a slot", err)
 	}
 	if directory.dialed != 0 {
 		t.Fatal("a directory connection was opened with every slot taken")

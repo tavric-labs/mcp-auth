@@ -317,7 +317,7 @@ func TestCredentialLoginThrottlesFailedAttemptsPerAccount(t *testing.T) {
 
 func TestCredentialLoginMethodFailureIsNotAWrongPassword(t *testing.T) {
 	method, entry := credentialEntry()
-	method.failWith = errors.New("directory unreachable at ldap.internal:636")
+	method.failWith = fmt.Errorf("%w: directory unreachable at ldap.internal:636", ErrMethodUnavailable)
 	instance := loginTestServer(t, entry)
 	loginID := loginPageID(t, instance)
 	for i := 0; i < loginMaxFailures+1; i++ {
@@ -500,9 +500,10 @@ func TestLoginLimiterBoundsMemory(t *testing.T) {
 	}
 }
 
-// When the limiter is full it drops the account whose latest attempt is
-// oldest, so a lock that was just earned is the last to go.
-func TestLoginLimiterEvictsTheOldestAccountNotAFreshLock(t *testing.T) {
+// A lock must survive an attacker filling the limiter with other names. The
+// fillers here are all newer than the victim's attempts, which is what made the
+// victim the oldest entry and the first to be dropped.
+func TestLoginLimiterNeverEvictsALockedAccount(t *testing.T) {
 	limiter := newLoginLimiter()
 	now := time.Now()
 	locked := loginLimiterKey("corp", "victim")
@@ -510,10 +511,54 @@ func TestLoginLimiterEvictsTheOldestAccountNotAFreshLock(t *testing.T) {
 		limiter.reserve(locked, now)
 	}
 	for i := 0; i < loginLimiterCapacity+100; i++ {
-		limiter.reserve(loginLimiterKey("corp", fmt.Sprintf("filler-%d", i)), now.Add(-time.Duration(1+i%100)*time.Second))
+		limiter.reserve(loginLimiterKey("corp", fmt.Sprintf("filler-%d", i)), now.Add(time.Duration(1+i%100)*time.Second))
+	}
+	if _, ok := limiter.reserve(locked, now.Add(101*time.Second)); ok {
+		t.Fatal("filling the limiter with other accounts unlocked a locked one")
+	}
+	if got := len(limiter.attempts); got > loginLimiterCapacity {
+		t.Fatalf("limiter holds %d keys, capacity is %d", got, loginLimiterCapacity)
+	}
+}
+
+// When every slot is a locked account there is nothing safe to drop, so a new
+// account is refused until one expires rather than unlocking another.
+func TestLoginLimiterRefusesNewAccountsWhenEverySlotIsLocked(t *testing.T) {
+	limiter := newLoginLimiter()
+	now := time.Now()
+	for i := 0; i < loginLimiterCapacity; i++ {
+		key := loginLimiterKey("corp", fmt.Sprintf("locked-%d", i))
+		for j := 0; j < loginMaxFailures; j++ {
+			limiter.reserve(key, now)
+		}
+	}
+	if _, ok := limiter.reserve(loginLimiterKey("corp", "newcomer"), now); ok {
+		t.Fatal("a new account was admitted by evicting a locked one")
+	}
+	if _, ok := limiter.reserve(loginLimiterKey("corp", "locked-0"), now); ok {
+		t.Fatal("a locked account was unlocked")
+	}
+	// Once the window passes the slots free up.
+	if _, ok := limiter.reserve(loginLimiterKey("corp", "newcomer"), now.Add(loginWindow+time.Second)); !ok {
+		t.Fatal("the limiter never recovered after the window")
+	}
+}
+
+func TestLoginLimiterPrefersToDropAnUnlockedAccount(t *testing.T) {
+	limiter := newLoginLimiter()
+	now := time.Now()
+	locked := loginLimiterKey("corp", "locked")
+	for i := 0; i < loginMaxFailures; i++ {
+		limiter.reserve(locked, now)
+	}
+	for i := 0; i < loginLimiterCapacity-1; i++ {
+		limiter.reserve(loginLimiterKey("corp", fmt.Sprintf("one-attempt-%d", i)), now)
+	}
+	if _, ok := limiter.reserve(loginLimiterKey("corp", "newcomer"), now); !ok {
+		t.Fatal("a new account was refused while unlocked accounts could be dropped")
 	}
 	if _, ok := limiter.reserve(locked, now); ok {
-		t.Fatal("filling the limiter evicted a fresh lock")
+		t.Fatal("making room dropped the locked account")
 	}
 }
 
@@ -926,5 +971,33 @@ func TestBindingNeverMatchesWhenEitherSideIsEmpty(t *testing.T) {
 		if bindingMatches(tc.presented, tc.pending) {
 			t.Errorf("%s: matched", name)
 		}
+	}
+}
+
+// A method failure that may have come after the password was checked must look
+// and count exactly like a wrong password. If it showed up as an outage instead,
+// it would tell an attacker the guess was right while leaving them unthrottled.
+func TestPostPasswordFailureIsIndistinguishableFromAWrongPassword(t *testing.T) {
+	method, entry := credentialEntry()
+	instance := loginTestServer(t, entry)
+	loginID := loginPageID(t, instance)
+
+	wrong := serve(instance, postForm("/login/corp", url.Values{"login_id": {loginID}, "username": {"alice"}, "password": {"wrong"}}))
+	loginID = loginIDPattern.FindStringSubmatch(wrong.Body.String())[1]
+
+	method.failWith = errors.New("entry has no \"entryUUID\" value to use as the subject")
+	for attempt := 2; attempt <= loginMaxFailures; attempt++ {
+		response := serve(instance, postForm("/login/corp", url.Values{"login_id": {loginID}, "username": {"alice"}, "password": {"correct horse"}}))
+		if response.Code != wrong.Code || !strings.Contains(response.Body.String(), "Sign-in failed") {
+			t.Fatalf("attempt %d: status %d, so a correct password looks different from a wrong one", attempt, response.Code)
+		}
+		if strings.Contains(response.Body.String(), "entryUUID") {
+			t.Fatal("the response leaked the method's internal error")
+		}
+		loginID = loginIDPattern.FindStringSubmatch(response.Body.String())[1]
+	}
+	locked := serve(instance, postForm("/login/corp", url.Values{"login_id": {loginID}, "username": {"alice"}, "password": {"correct horse"}}))
+	if locked.Code != http.StatusTooManyRequests {
+		t.Fatalf("post-password failures were not counted: status %d after %d attempts", locked.Code, loginMaxFailures)
 	}
 }

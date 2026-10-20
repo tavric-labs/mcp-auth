@@ -80,6 +80,19 @@ type CredentialLoginMethod interface {
 // wrong password or an unknown account.
 var ErrInvalidCredentials = errors.New("invalid credentials")
 
+// ErrMethodUnavailable marks a failure that happened before the person's
+// password was tested: the directory could not be reached, the service account
+// was refused, the lookup failed. Such an attempt is not counted against the
+// account and is reported as an outage.
+//
+// A method must return it only for failures that cannot depend on whether the
+// password was right. Any other error from Authenticate is treated as a failed
+// attempt, counted and shown exactly like a wrong password, because it may have
+// come after the password was checked, and an answer that differs from "wrong
+// password" would tell an attacker the guess was correct while leaving them
+// unthrottled.
+var ErrMethodUnavailable = errors.New("login method unavailable")
+
 // loginMethodIDPattern keeps ids safe in a URL path segment and free of the
 // "." that separates the id from the random part of the upstream state.
 var loginMethodIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
@@ -275,30 +288,40 @@ func (l *loginLimiter) reserve(key string, now time.Time) (loginTicket, bool) {
 	if len(l.prune(key, now)) >= loginMaxFailures {
 		return loginTicket{}, false
 	}
-	if _, known := l.attempts[key]; !known && len(l.attempts) >= loginLimiterCapacity {
-		l.evict(now)
+	if _, known := l.attempts[key]; !known && len(l.attempts) >= loginLimiterCapacity && !l.makeRoom(now) {
+		// Every tracked account is locked. Refusing the newcomer is the only
+		// way to keep those locks, so an unknown account waits for one to expire.
+		return loginTicket{}, false
 	}
 	l.seq++
 	l.attempts[key] = append(l.attempts[key], loginAttemptRecord{at: now, seq: l.seq})
 	return loginTicket{limiter: l, key: key, seq: l.seq}, true
 }
 
-// evict makes room: expired accounts first, otherwise the account whose most
-// recent attempt is oldest, so a fresh lock is the last one to go.
-func (l *loginLimiter) evict(now time.Time) {
-	var oldestKey string
-	var oldest time.Time
+// makeRoom frees one slot and reports whether it could. An account that has
+// expired goes first; otherwise the unlocked account whose latest attempt is
+// oldest. A locked account is never dropped: otherwise filling the limiter
+// with other names would unlock it.
+func (l *loginLimiter) makeRoom(now time.Time) bool {
+	var victim string
+	var victimLatest time.Time
 	for key := range l.attempts {
 		records := l.prune(key, now)
 		if len(records) == 0 {
-			return
+			return true
 		}
-		latest := records[len(records)-1].at
-		if oldestKey == "" || latest.Before(oldest) {
-			oldestKey, oldest = key, latest
+		if len(records) >= loginMaxFailures {
+			continue
+		}
+		if latest := records[len(records)-1].at; victim == "" || latest.Before(victimLatest) {
+			victim, victimLatest = key, latest
 		}
 	}
-	delete(l.attempts, oldestKey)
+	if victim == "" {
+		return false
+	}
+	delete(l.attempts, victim)
+	return true
 }
 
 type loginTicket struct {

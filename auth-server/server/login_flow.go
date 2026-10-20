@@ -238,24 +238,26 @@ func (s *Server) attemptCredentialLogin(w http.ResponseWriter, r *http.Request, 
 	identity, err := method.Authenticate(r.Context(), IdentityRequest{
 		ClientID: request.ClientID, Nonce: pending.Nonce, Resource: request.Resource, Scopes: request.Scope,
 	}, LoginAttempt{Values: values, RemoteAddr: remoteHost(r)})
+	if err == nil {
+		identity, err = entry.qualify(identity)
+	}
 	if err != nil {
-		if errors.Is(err, ErrInvalidCredentials) {
-			// The reservation stays: a wrong password is what is being counted.
-			s.Audit.Event("login", "failure", map[string]any{"method": method.ID(), "reason": "invalid_credentials"})
-			s.retryLogin(w, registry, method, pending, loginID, binding, http.StatusUnauthorized, "Sign-in failed. Check your details and try again.", values)
+		if errors.Is(err, ErrMethodUnavailable) {
+			// The password was never tested, so this attempt does not count.
+			ticket.abandon()
+			s.Audit.Event("login", "failure", map[string]any{"method": method.ID(), "reason": err.Error()})
+			s.retryLogin(w, registry, method, pending, loginID, binding, http.StatusServiceUnavailable, "Sign-in is temporarily unavailable. Try again shortly.", values)
 			return
 		}
-		// The password was never tested, so this attempt does not count.
-		ticket.abandon()
-		s.Audit.Event("login", "failure", map[string]any{"method": method.ID(), "reason": err.Error()})
-		s.retryLogin(w, registry, method, pending, loginID, binding, http.StatusServiceUnavailable, "Sign-in is temporarily unavailable. Try again shortly.", values)
-		return
-	}
-	identity, err = entry.qualify(identity)
-	if err != nil {
-		ticket.abandon()
-		s.Audit.Event("login", "failure", map[string]any{"method": method.ID(), "reason": err.Error()})
-		oauthError(w, http.StatusInternalServerError, "server_error")
+		// A wrong password, and any failure that may have come after the
+		// password was checked, look the same and count the same. Otherwise a
+		// different answer would reveal that the guess was right.
+		reason := "invalid_credentials"
+		if !errors.Is(err, ErrInvalidCredentials) {
+			reason = err.Error()
+		}
+		s.Audit.Event("login", "failure", map[string]any{"method": method.ID(), "reason": reason})
+		s.retryLogin(w, registry, method, pending, loginID, binding, http.StatusUnauthorized, "Sign-in failed. Check your details and try again.", values)
 		return
 	}
 	ticket.success()

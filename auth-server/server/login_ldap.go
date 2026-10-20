@@ -261,11 +261,11 @@ func (m *LDAPLoginMethod) Authenticate(ctx context.Context, _ IdentityRequest, a
 	case m.slots <- struct{}{}:
 		defer func() { <-m.slots }()
 	case <-ctx.Done():
-		return Identity{}, ctx.Err()
+		return Identity{}, fmt.Errorf("%w: %v", ErrMethodUnavailable, ctx.Err())
 	}
 	conn, err := m.dial(ctx)
 	if err != nil {
-		return Identity{}, fmt.Errorf("connect to directory: %w", err)
+		return Identity{}, fmt.Errorf("%w: connect to directory: %v", ErrMethodUnavailable, err)
 	}
 	defer func() { _ = conn.Close() }()
 	// The library cannot be interrupted, so a cancelled request closes the
@@ -312,7 +312,7 @@ func (m *LDAPLoginMethod) attributes() []string {
 
 func (m *LDAPLoginMethod) findEntry(conn ldapConn, username string, attributes []string) (*ldap.Entry, error) {
 	if err := conn.Bind(m.config.BindDN, m.bindPassword); err != nil {
-		return nil, fmt.Errorf("service account bind: %w", err)
+		return nil, fmt.Errorf("%w: service account bind: %v", ErrMethodUnavailable, err)
 	}
 	filter := strings.Replace(m.config.UserFilter, ldapUsernamePlaceholder, ldap.EscapeFilter(username), 1)
 	result, err := conn.Search(ldap.NewSearchRequest(
@@ -323,7 +323,7 @@ func (m *LDAPLoginMethod) findEntry(conn ldapConn, username string, attributes [
 		if ldap.IsErrorWithCode(err, ldap.LDAPResultSizeLimitExceeded) {
 			return nil, fmt.Errorf("%w: user_filter matched more than one entry", ErrInvalidCredentials)
 		}
-		return nil, fmt.Errorf("user search: %w", err)
+		return nil, fmt.Errorf("%w: user search: %v", ErrMethodUnavailable, err)
 	}
 	switch len(result.Entries) {
 	case 1:
@@ -367,7 +367,7 @@ func bindAsUser(conn ldapConn, dn, password string) error {
 		ldap.IsErrorWithCode(err, ldap.LDAPResultInvalidDNSyntax):
 		return ErrInvalidCredentials
 	default:
-		return fmt.Errorf("user bind: %w", err)
+		return fmt.Errorf("%w: user bind: %v", ErrMethodUnavailable, err)
 	}
 }
 

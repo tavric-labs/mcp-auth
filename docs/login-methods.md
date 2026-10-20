@@ -204,13 +204,19 @@ accounts are not linked.
 - **Failed attempts are throttled per account.** Five attempts on one account
   within five minutes lock that account out of that method until the window
   passes. An attempt is counted when it starts, so parallel requests cannot all
-  pass while the first waits on the directory, and an attempt that never tested
-  the password (a directory outage) is not counted. Names are compared after
+  pass while the first waits on the directory. An attempt that never tested the
+  password (the directory could not be reached or refused the service account)
+  is not counted and is shown as an outage. Any other failure, including one
+  after the password was accepted such as an entry with no subject attribute, is
+  counted and shown exactly like a wrong password, so a different response
+  cannot reveal that a guess was right. Names are compared after
   trimming, collapsing whitespace, lowercasing and Unicode NFKC normalization,
   so `alice`, `Alice ` and a fullwidth spelling share one count. Aliases a
   directory defines itself, such as `DOMAIN\alice` and `alice@domain`, cannot
   be unified, so they get separate counts. The count is in memory and per
-  replica, and it does not key on client address, because behind a proxy
+  replica. Up to 50,000 accounts are tracked; a locked account is never dropped
+  to make room, and if every tracked account is locked a new account is refused
+  until one expires. It does not key on client address, because behind a proxy
   everyone shares one. Add rate limiting at your proxy for volume attacks. A
   lockout can also be used to lock a known account out for a few minutes.
   Unknown accounts return slightly faster than known ones, which is a timing
@@ -241,8 +247,11 @@ A method implements one of two small interfaces in
   provider and returns to `/identity/callback`.
 - `CredentialLoginMethod` (`Fields`, `Authenticate`): the person types
   credentials into the login page. Return `ErrInvalidCredentials` for a wrong
-  password or unknown account, and any other error for a failure of the
-  method itself.
+  password or unknown account. Return an error wrapping `ErrMethodUnavailable`
+  only for a failure that cannot depend on whether the password was right (the
+  backend could not be reached, a lookup failed before the password was
+  checked). Every other error is treated as a failed attempt, counted and shown
+  like a wrong password.
 
 Register it in `ParseLoginMethods` with a config type, the same way `ldap`
 does in `login_config.go`. The registry handles the page, the state, subject
