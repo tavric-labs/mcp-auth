@@ -10,6 +10,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // A login method is one way a person proves who they are before mcp-auth
@@ -134,7 +137,33 @@ func NewLoginRegistry(entries ...LoginEntry) (*LoginRegistry, error) {
 		registry.byID[id] = entry
 		registry.entries = append(registry.entries, entry)
 	}
+	if err := registry.checkSubjectPrefixes(); err != nil {
+		return nil, err
+	}
 	return registry, nil
+}
+
+// checkSubjectPrefixes refuses prefixes under which two methods could mint
+// the same subject. Subjects are what a resource server keys a person on, so
+// a collision lets one person's account stand in for another's. Two methods
+// cannot share a prefix, and one non-empty prefix cannot begin another (with
+// "a-" and "a-b-", the id "b-1" from the first equals "1" from the second).
+// A single empty prefix is allowed, for keeping an existing connector's
+// subjects; its subjects must not themselves start with another method's
+// prefix, which this cannot check.
+func (r *LoginRegistry) checkSubjectPrefixes() error {
+	for i, a := range r.entries {
+		for _, b := range r.entries[i+1:] {
+			pa, pb := a.SubjectPrefix, b.SubjectPrefix
+			switch {
+			case pa == pb:
+				return fmt.Errorf("login methods %q and %q use the same subject prefix %q, so they could issue the same subject", a.Method.ID(), b.Method.ID(), pa)
+			case pa != "" && pb != "" && (strings.HasPrefix(pa, pb) || strings.HasPrefix(pb, pa)):
+				return fmt.Errorf("subject prefixes %q (%s) and %q (%s) overlap, so they could issue the same subject", pa, a.Method.ID(), pb, b.Method.ID())
+			}
+		}
+	}
+	return nil
 }
 
 // Authenticate satisfies IdentityProvider. Registry sign-in always goes
@@ -178,66 +207,125 @@ const (
 	loginLimiterCapacity = 50000
 )
 
-// loginLimiter throttles failed credential attempts per (method, account).
-// It is deliberately in-memory and per replica: it blunts online guessing
-// against one account and is not a substitute for rate limiting at the proxy.
-// It does not key on client address, because behind a proxy every person
-// shares one and the limiter would lock everyone out together.
-type loginLimiter struct {
-	mu       sync.Mutex
-	failures map[string][]time.Time
-}
-
-func newLoginLimiter() *loginLimiter {
-	return &loginLimiter{failures: map[string][]time.Time{}}
+// normalizeLoginAccount reduces an account name to the form the throttle keys
+// on, so spellings a directory treats as one account share one lockout:
+// surrounding and repeated whitespace, letter case, and Unicode compatibility
+// forms (RFC 4518 matching applies NFKC, so a fullwidth name is the same
+// account). It is for keying only; what is sent to a directory is separate.
+// Aliases a directory defines itself, such as DOMAIN\name and name@domain,
+// cannot be unified here, which is why this is not the only defence.
+func normalizeLoginAccount(account string) string {
+	folded := strings.ToLower(norm.NFKC.String(account))
+	return strings.Join(strings.FieldsFunc(folded, unicode.IsSpace), " ")
 }
 
 // loginLimiterKey hashes the account so the map holds fixed-size keys and no
 // account names.
 func loginLimiterKey(method, account string) string {
-	sum := sha256.Sum256([]byte(method + "\x00" + strings.ToLower(account)))
+	sum := sha256.Sum256([]byte(method + "\x00" + normalizeLoginAccount(account)))
 	return hex.EncodeToString(sum[:16])
 }
 
-func (l *loginLimiter) recent(key string, now time.Time) []time.Time {
-	kept := l.failures[key][:0]
-	for _, at := range l.failures[key] {
-		if now.Sub(at) < loginWindow {
-			kept = append(kept, at)
+type loginAttemptRecord struct {
+	at  time.Time
+	seq uint64
+}
+
+// loginLimiter throttles failed credential attempts per (method, account).
+// It is deliberately in-memory and per replica: it blunts online guessing
+// against one account and is not a substitute for rate limiting at the proxy.
+// It does not key on client address, because behind a proxy every person
+// shares one and the limiter would lock everyone out together.
+//
+// An attempt is counted when it starts, not when it fails. Counting only
+// failures would let any number of requests pass the check while the first is
+// still waiting on the directory.
+type loginLimiter struct {
+	mu       sync.Mutex
+	seq      uint64
+	attempts map[string][]loginAttemptRecord
+}
+
+func newLoginLimiter() *loginLimiter {
+	return &loginLimiter{attempts: map[string][]loginAttemptRecord{}}
+}
+
+func (l *loginLimiter) prune(key string, now time.Time) []loginAttemptRecord {
+	kept := l.attempts[key][:0]
+	for _, record := range l.attempts[key] {
+		if now.Sub(record.at) < loginWindow {
+			kept = append(kept, record)
 		}
 	}
 	if len(kept) == 0 {
-		delete(l.failures, key)
+		delete(l.attempts, key)
 		return nil
 	}
-	l.failures[key] = kept
+	l.attempts[key] = kept
 	return kept
 }
 
-// allow reports whether another attempt may be made for the account.
-func (l *loginLimiter) allow(key string, now time.Time) bool {
+// reserve counts an attempt against the account and reports whether it may
+// proceed. The returned ticket is released with success (the account is
+// cleared) or abandon (the attempt did not test the password, for example
+// because the directory was down); a wrong password just leaves the count.
+func (l *loginLimiter) reserve(key string, now time.Time) (loginTicket, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return len(l.recent(key, now)) < loginMaxFailures
+	if len(l.prune(key, now)) >= loginMaxFailures {
+		return loginTicket{}, false
+	}
+	if _, known := l.attempts[key]; !known && len(l.attempts) >= loginLimiterCapacity {
+		l.evict(now)
+	}
+	l.seq++
+	l.attempts[key] = append(l.attempts[key], loginAttemptRecord{at: now, seq: l.seq})
+	return loginTicket{limiter: l, key: key, seq: l.seq}, true
 }
 
-func (l *loginLimiter) fail(key string, now time.Time) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if _, known := l.failures[key]; !known && len(l.failures) >= loginLimiterCapacity {
-		for other := range l.failures {
-			if len(l.recent(other, now)) == 0 {
-				continue
-			}
-			delete(l.failures, other)
+// evict makes room: expired accounts first, otherwise the account whose most
+// recent attempt is oldest, so a fresh lock is the last one to go.
+func (l *loginLimiter) evict(now time.Time) {
+	var oldestKey string
+	var oldest time.Time
+	for key := range l.attempts {
+		records := l.prune(key, now)
+		if len(records) == 0 {
+			return
+		}
+		latest := records[len(records)-1].at
+		if oldestKey == "" || latest.Before(oldest) {
+			oldestKey, oldest = key, latest
+		}
+	}
+	delete(l.attempts, oldestKey)
+}
+
+type loginTicket struct {
+	limiter *loginLimiter
+	key     string
+	seq     uint64
+}
+
+// success clears the account's count.
+func (t loginTicket) success() {
+	t.limiter.mu.Lock()
+	defer t.limiter.mu.Unlock()
+	delete(t.limiter.attempts, t.key)
+}
+
+// abandon removes this attempt's count: it never tested the password.
+func (t loginTicket) abandon() {
+	t.limiter.mu.Lock()
+	defer t.limiter.mu.Unlock()
+	records := t.limiter.attempts[t.key]
+	for index, record := range records {
+		if record.seq == t.seq {
+			t.limiter.attempts[t.key] = append(records[:index], records[index+1:]...)
 			break
 		}
 	}
-	l.failures[key] = append(l.recent(key, now), now)
-}
-
-func (l *loginLimiter) reset(key string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	delete(l.failures, key)
+	if len(t.limiter.attempts[t.key]) == 0 {
+		delete(t.limiter.attempts, t.key)
+	}
 }

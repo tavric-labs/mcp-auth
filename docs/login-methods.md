@@ -93,7 +93,7 @@ and nonce.
 | --- | --- |
 | `client_id` or `client_id_env` | Exactly one. |
 | `client_secret_env` | Required. |
-| `allowed_domains` | Optional. Admits only accounts with a **verified** email in one of these bare domains (for example a Workspace domain). Without it, any Google account can sign in. |
+| `allowed_domains` | Optional. Admits only accounts that one of these Google Workspace domains **manages** (Google's `hd` claim) and whose email is verified. List `gmail.com` to admit consumer Gmail accounts. Without it, any Google account can sign in. An address at a company domain alone is not enough: a consumer Google account can be created with any address. |
 
 ### `github`
 
@@ -123,7 +123,10 @@ Find the person's entry in one of two ways:
   entry, then `mcp-auth` binds as it. `user_filter` contains `{username}` once.
 - **Direct bind** (`user_dn_template`): build the DN from the username, for
   example `uid={username},ou=people,dc=example,dc=com`. Use this when every
-  account lives in one flat container.
+  account lives in one flat container. After the bind, `mcp-auth` reads the
+  person's own entry back, so the account must be allowed to read it, and the
+  subject comes from that entry (including `dn`, which is then the directory's
+  spelling, not the typed one: `Alice` and `alice` are one account).
 
 Configure one or the other, not both.
 
@@ -132,7 +135,7 @@ Configure one or the other, not both.
 | `url` | `ldaps://host[:port]`, or `ldap://host[:port]` with `start_tls`. |
 | `start_tls` | Upgrade an `ldap://` connection. Not valid with `ldaps://`. |
 | `ca_file` | PEM bundle of trusted CAs. Empty uses the system roots. |
-| `subject_attribute` | **Required.** The attribute used as the person's subject, or `dn`. Choose one that never changes for a person (`entryUUID`, `employeeNumber`, or the text form of `objectGUID`). A name that can be renamed or reused would let a new account inherit an old account's access. |
+| `subject_attribute` | **Required.** The attribute used as the person's subject, or `dn`. Choose one that never changes for a person (`entryUUID`, `employeeNumber`, `objectGUID`). A name that can be renamed or reused would let a new account inherit an old account's access. The attribute must have exactly one value and is used exactly as stored, with no trimming. A binary value such as `objectGUID`, or one that is not printable text, becomes `hex:` followed by its bytes in lowercase hex. |
 | `claims` | Optional map of claim name to attribute, for example `{"email": "mail"}`. |
 | `username_label`, `password_label` | Optional form labels. |
 
@@ -150,7 +153,9 @@ What is enforced:
 - An unknown account and a wrong password give the same answer. An outage or a
   broken service account is reported as "temporarily unavailable", never as a
   wrong password.
-- Connections time out (5 s to connect, 10 s per operation).
+- Connections time out (5 s to connect, a further 10 s for the TLS handshake
+  and StartTLS, 10 s per operation), a cancelled request closes its connection,
+  and at most 16 connections per method are open at once.
 
 Limit who may sign in with the filter itself, for example
 `(&(objectClass=person)(uid={username})(memberOf=cn=mcp-users,ou=groups,dc=example,dc=com))`.
@@ -171,24 +176,51 @@ subject, and with it a refresh-token family and any per-user mapping at a
 resource server. So each subject is prefixed with the method id by default
 (`google:1008...`, `github:583231`, `corp:b1f6...`).
 
+Startup refuses prefixes under which two methods could issue the same subject:
+two methods cannot share a prefix, and one non-empty prefix cannot begin
+another (with `a-` and `a-b-`, the id `b-1` from the first equals `1` from the
+second).
+
 To move from a single connector to login methods without changing existing
-subjects, set `"subject_prefix": ""` on that method. Two methods with an empty
-prefix can collide, so use it for at most one.
+subjects, set `"subject_prefix": ""` on that method. Only one method may do
+this, and its provider's subjects must not themselves start with another
+method's prefix, which `mcp-auth` cannot check.
 
 People who sign in through two methods are two different identities here;
 accounts are not linked.
 
 ## Behaviour to know about
 
-- **Failed attempts are throttled per account.** Five failures on one account
+- **Sign-in is tied to the browser that approved consent.** Approving consent
+  sets a short-lived, random, `HttpOnly`, `SameSite=Lax` cookie
+  (`mcp_auth_login_*`, with the `__Host-` prefix over HTTPS), one per sign-in.
+  The login form and the provider callback both require it. Without this,
+  someone could approve consent for their own client and send the login link to
+  a victim, who would sign in on the real server while the authorization code
+  went to the attacker. A request from another browser is refused before any
+  password is tried and does not use up the real browser's sign-in. Browsers
+  that block cookies cannot sign in. Single-connector mode does not have this
+  binding.
+- **Failed attempts are throttled per account.** Five attempts on one account
   within five minutes lock that account out of that method until the window
-  passes. The count is in memory and per replica. It does not key on client
-  address, because behind a proxy everyone shares one. Add rate limiting at
-  your proxy for volume attacks, and note that a lockout can also be used to
-  lock a victim out for a few minutes.
+  passes. An attempt is counted when it starts, so parallel requests cannot all
+  pass while the first waits on the directory, and an attempt that never tested
+  the password (a directory outage) is not counted. Names are compared after
+  trimming, collapsing whitespace, lowercasing and Unicode NFKC normalization,
+  so `alice`, `Alice ` and a fullwidth spelling share one count. Aliases a
+  directory defines itself, such as `DOMAIN\alice` and `alice@domain`, cannot
+  be unified, so they get separate counts. The count is in memory and per
+  replica, and it does not key on client address, because behind a proxy
+  everyone shares one. Add rate limiting at your proxy for volume attacks. A
+  lockout can also be used to lock a known account out for a few minutes.
+  Unknown accounts return slightly faster than known ones, which is a timing
+  difference an attacker could use to test whether an account exists.
 - **The sign-in window is bounded.** `MCP_AUTH_LOGIN_TTL` (default `10m`) is
-  how long a person has from approving consent to finishing sign-in. A failed
-  password attempt never extends it.
+  how long a person has from approving consent to finishing sign-in. Neither a
+  failed password attempt nor choosing a provider extends it.
+- **Records are kept apart.** Consent ids, login ids and provider states share
+  one store table, and each kind is stored under its own key space, so an id
+  from one stage cannot be used at another (a consent id is not a login id).
 - **No upstream session is kept.** Login methods establish identity only. The
   `upstream_session` downstream-token strategy and RFC 8693 exchange against a
   single connector are not available in this mode; use

@@ -54,9 +54,10 @@ type GoogleConfig struct {
 	ClientID        string
 	ClientIDEnv     string
 	ClientSecretEnv string
-	// AllowedDomains, when set, admits only accounts whose verified email is in
-	// one of these domains (for example a Google Workspace domain). Without it,
-	// any Google account can sign in.
+	// AllowedDomains, when set, admits only accounts that one of these Google
+	// Workspace domains manages (Google's hd claim) and whose email is
+	// verified; "gmail.com" admits consumer Gmail accounts. Without it, any
+	// Google account can sign in.
 	AllowedDomains []string
 }
 
@@ -101,8 +102,17 @@ func NewGoogleLoginMethod(config GoogleConfig, callbackURL string, allowInsecure
 	return NewOIDCLoginMethod(config.ID, config.Label, provider, allowedEmailDomains(config.AllowedDomains)), nil
 }
 
-// allowedEmailDomains returns a claims check that requires a verified email in
-// one of the domains, or nil when no restriction is configured.
+// consumerMailDomain is the one domain whose accounts carry no hd claim.
+const consumerMailDomain = "gmail.com"
+
+// allowedEmailDomains returns a claims check that admits only accounts managed
+// by one of the domains, or nil when no restriction is configured.
+//
+// An address at a company domain is not proof of belonging to it: a consumer
+// Google account can be created with any address and have email_verified set.
+// Google's hd (hosted domain) claim is what says a Workspace domain manages the
+// account, so it is required. The one exception is gmail.com, whose accounts
+// have no hd.
 func allowedEmailDomains(domains []string) func(map[string]any) error {
 	if len(domains) == 0 {
 		return nil
@@ -117,8 +127,12 @@ func allowedEmailDomains(domains []string) func(map[string]any) error {
 		if at < 1 || !emailVerified(claims["email_verified"]) {
 			return errors.New("account has no verified email address")
 		}
-		if !allowed[strings.ToLower(email[at+1:])] {
-			return errors.New("email domain is not allowed")
+		hostedDomain, _ := claims["hd"].(string)
+		hostedDomain = strings.ToLower(hostedDomain)
+		managed := hostedDomain != "" && allowed[hostedDomain]
+		consumer := hostedDomain == "" && strings.ToLower(email[at+1:]) == consumerMailDomain && allowed[consumerMailDomain]
+		if !managed && !consumer {
+			return errors.New("account is not managed by an allowed domain")
 		}
 		return nil
 	}

@@ -43,6 +43,10 @@ type AuthorizationRequest struct {
 	Resource      string   `json:"resource"`
 	ResponseType  string   `json:"response_type"`
 	Nonce         string   `json:"nonce"`
+	// LoginBinding is the hash of a random value held in the browser that
+	// approved consent. Login-methods mode requires the browser to present it
+	// again to sign in (see login_flow.go). It is never read from a request.
+	LoginBinding string `json:"login_binding,omitempty"`
 }
 
 func NewServer(config Config, store Store, identityProvider IdentityProvider, exchanger TokenExchanger, auditWriter io.Writer) (*Server, error) {

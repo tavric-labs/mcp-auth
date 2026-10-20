@@ -181,20 +181,23 @@ func TestGitHubConfigValidation(t *testing.T) {
 }
 
 func TestGoogleAllowedDomains(t *testing.T) {
-	check := allowedEmailDomains([]string{"Example.com"})
+	check := allowedEmailDomains([]string{"Example.com", consumerMailDomain})
 	cases := map[string]struct {
 		claims map[string]any
 		ok     bool
 	}{
-		"verified, allowed":        {map[string]any{"email": "a@example.com", "email_verified": true}, true},
-		"verified string true":     {map[string]any{"email": strings.ToUpper("a@example.com"), "email_verified": "true"}, true},
-		"unverified":               {map[string]any{"email": "a@example.com", "email_verified": false}, false},
-		"verified flag missing":    {map[string]any{"email": "a@example.com"}, false},
-		"other domain":             {map[string]any{"email": "a@example.org", "email_verified": true}, false},
-		"subdomain is not a match": {map[string]any{"email": "a@mail.example.com", "email_verified": true}, false},
-		"no email":                 {map[string]any{"email_verified": true}, false},
-		"no local part":            {map[string]any{"email": "@example.com", "email_verified": true}, false},
-		"domain in local part":     {map[string]any{"email": "a@example.com@example.org", "email_verified": true}, false},
+		"workspace account, verified":      {map[string]any{"email": "a@example.com", "email_verified": true, "hd": "example.com"}, true},
+		"verified as string true":          {map[string]any{"email": strings.ToUpper("a@example.com"), "email_verified": "true", "hd": "EXAMPLE.com"}, true},
+		"alias domain of the workspace":    {map[string]any{"email": "a@example.org", "email_verified": true, "hd": "example.com"}, true},
+		"consumer gmail account":           {map[string]any{"email": "a@" + consumerMailDomain, "email_verified": true}, true},
+		"company address on a consumer id": {map[string]any{"email": "a@example.com", "email_verified": true}, false},
+		"hd of another workspace":          {map[string]any{"email": "a@example.com", "email_verified": true, "hd": "example.org"}, false},
+		"unverified":                       {map[string]any{"email": "a@example.com", "email_verified": false, "hd": "example.com"}, false},
+		"verified flag missing":            {map[string]any{"email": "a@example.com", "hd": "example.com"}, false},
+		"subdomain hd is not a match":      {map[string]any{"email": "a@mail.example.com", "email_verified": true, "hd": "mail.example.com"}, false},
+		"gmail lookalike with an hd":       {map[string]any{"email": "a@" + consumerMailDomain, "email_verified": true, "hd": "example.org"}, false},
+		"no email":                         {map[string]any{"email_verified": true, "hd": "example.com"}, false},
+		"no local part":                    {map[string]any{"email": "@example.com", "email_verified": true, "hd": "example.com"}, false},
 	}
 	for name, tc := range cases {
 		if err := check(tc.claims); (err == nil) != tc.ok {
@@ -203,6 +206,10 @@ func TestGoogleAllowedDomains(t *testing.T) {
 	}
 	if allowedEmailDomains(nil) != nil {
 		t.Error("no domains configured must mean no restriction")
+	}
+	workspaceOnly := allowedEmailDomains([]string{"example.com"})
+	if workspaceOnly(map[string]any{"email": "a@" + consumerMailDomain, "email_verified": true}) == nil {
+		t.Error("gmail.com was admitted without being listed")
 	}
 }
 

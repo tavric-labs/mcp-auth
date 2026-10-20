@@ -209,17 +209,28 @@ func TestLDAPFailureModes(t *testing.T) {
 	})
 }
 
-func TestLDAPDirectBindEscapesTheDN(t *testing.T) {
+func directBindMethod(t *testing.T, subjectAttribute string) (*LDAPLoginMethod, *fakeDirectory) {
+	t.Helper()
 	config := LDAPConfig{
 		ID: "corp", Label: "Corp", URL: "ldaps://ldap.example.com",
-		UserDNTemplate: "uid={username},ou=people,dc=example,dc=com", SubjectAttribute: "dn",
+		UserDNTemplate: "uid={username},ou=people,dc=example,dc=com", SubjectAttribute: subjectAttribute,
 	}
 	method, err := NewLDAPLoginMethod(config, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	directory := &fakeDirectory{passwords: map[string]string{"uid=alice,ou=people,dc=example,dc=com": "pw"}}
+	directory := &fakeDirectory{passwords: map[string]string{
+		"uid=alice,ou=people,dc=example,dc=com": "pw",
+		"uid=Alice,ou=people,dc=example,dc=com": "pw",
+		"uid=ALICE,ou=people,dc=example,dc=com": "pw",
+	}}
 	method.dial = directory.dial
+	return method, directory
+}
+
+func TestLDAPDirectBindEscapesTheDN(t *testing.T) {
+	method, directory := directBindMethod(t, "dn")
+	directory.entries = []*ldap.Entry{ldap.NewEntry("uid=alice,ou=people,dc=example,dc=com", nil)}
 	identity, err := method.Authenticate(context.Background(), IdentityRequest{}, attempt("alice", "pw"))
 	if err != nil || identity.Subject != "uid=alice,ou=people,dc=example,dc=com" {
 		t.Fatalf("identity %+v err %v", identity, err)
@@ -229,8 +240,107 @@ func TestLDAPDirectBindEscapesTheDN(t *testing.T) {
 	if len(directory.binds) != 1 || strings.Contains(directory.binds[0][0], "x,ou=admins,ou=people") {
 		t.Fatalf("a comma in the username changed the DN structure: %v", directory.binds)
 	}
-	if len(directory.searches) != 0 {
-		t.Fatal("subject_attribute dn needs no search")
+}
+
+// The DN built from what was typed keeps the typed spelling. Using it as the
+// subject would give one account a different subject per capitalization, which
+// defeats per-subject limits, bans and mappings.
+func TestLDAPDirectBindSubjectIsTheDirectorysDNNotTheTypedOne(t *testing.T) {
+	method, directory := directBindMethod(t, "dn")
+	directory.entries = []*ldap.Entry{ldap.NewEntry("uid=alice,ou=people,dc=example,dc=com", nil)}
+	subjects := map[string]bool{}
+	for _, typed := range []string{"alice", "Alice", "ALICE"} {
+		identity, err := method.Authenticate(context.Background(), IdentityRequest{}, attempt(typed, "pw"))
+		if err != nil {
+			t.Fatalf("%s: %v", typed, err)
+		}
+		subjects[identity.Subject] = true
+	}
+	if len(subjects) != 1 {
+		t.Fatalf("one account produced %d subjects: %v", len(subjects), subjects)
+	}
+	if len(directory.searches) != 3 || directory.searches[0].Scope != ldap.ScopeBaseObject {
+		t.Fatalf("the entry must be read back with a base-object search: %v", directory.searches)
+	}
+}
+
+func TestLDAPDirectBindFailsClosedWhenTheEntryCannotBeRead(t *testing.T) {
+	method, directory := directBindMethod(t, "dn")
+	directory.searchErr = errors.New("insufficient access")
+	if _, err := method.Authenticate(context.Background(), IdentityRequest{}, attempt("alice", "pw")); err == nil || errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("err = %v, want a non-credential failure", err)
+	}
+	directory.searchErr = nil
+	directory.entries = nil
+	if _, err := method.Authenticate(context.Background(), IdentityRequest{}, attempt("alice", "pw")); err == nil {
+		t.Fatal("a missing entry still signed the person in")
+	}
+}
+
+func TestLDAPSubjectValues(t *testing.T) {
+	entry := func(attribute string, values ...[]byte) *ldap.Entry {
+		e := ldap.NewEntry("uid=alice,dc=example,dc=com", nil)
+		e.Attributes = append(e.Attributes, &ldap.EntryAttribute{Name: attribute, Values: nil, ByteValues: values})
+		for _, value := range values {
+			e.Attributes[0].Values = append(e.Attributes[0].Values, string(value))
+		}
+		return e
+	}
+	t.Run("text is kept exactly, not trimmed", func(t *testing.T) {
+		got, err := ldapSubjectValue(entry("employeeNumber", []byte(" 00123 ")), "employeeNumber")
+		if err != nil || got != " 00123 " {
+			t.Fatalf("got %q, %v", got, err)
+		}
+	})
+	t.Run("binary is hex encoded", func(t *testing.T) {
+		got, err := ldapSubjectValue(entry("objectGUID", []byte{0x01, 0x20, 0xff, 0x09}), "objectGUID")
+		if err != nil || got != "hex:0120ff09" {
+			t.Fatalf("got %q, %v", got, err)
+		}
+	})
+	t.Run("invalid UTF-8 with no control bytes is hex encoded", func(t *testing.T) {
+		got, err := ldapSubjectValue(entry("objectGUID", []byte{0xff, 0xfe}), "objectGUID")
+		if err != nil || got != "hex:fffe" {
+			t.Fatalf("got %q, %v", got, err)
+		}
+	})
+	t.Run("distinct binary values stay distinct", func(t *testing.T) {
+		a, _ := ldapSubjectValue(entry("objectGUID", []byte{0xff, 0xfe}), "objectGUID")
+		b, _ := ldapSubjectValue(entry("objectGUID", []byte{0xfe, 0xff}), "objectGUID")
+		if a == b {
+			t.Fatal("distinct GUIDs collided")
+		}
+	})
+	t.Run("control characters are encoded", func(t *testing.T) {
+		got, _ := ldapSubjectValue(entry("x", []byte("a\x01b")), "x")
+		if !strings.HasPrefix(got, "hex:") {
+			t.Fatalf("got %q", got)
+		}
+	})
+	for name, e := range map[string]*ldap.Entry{
+		"no value":       ldap.NewEntry("uid=alice,dc=x", nil),
+		"empty value":    entry("x", []byte{}),
+		"several values": entry("x", []byte("a"), []byte("b")),
+	} {
+		if _, err := ldapSubjectValue(e, "x"); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestLDAPAttemptsAreBoundedAndHonourCancellation(t *testing.T) {
+	directory := &fakeDirectory{}
+	method := newSearchMethod(t, directory)
+	for i := 0; i < ldapMaxConcurrent; i++ {
+		method.slots <- struct{}{}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := method.Authenticate(ctx, IdentityRequest{}, attempt("alice", "pw")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the cancellation while waiting for a slot", err)
+	}
+	if directory.dialed != 0 {
+		t.Fatal("a directory connection was opened with every slot taken")
 	}
 }
 

@@ -1,12 +1,16 @@
 package server
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"html/template"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 const (
@@ -23,32 +27,109 @@ func (s *Server) loginRegistry() *LoginRegistry {
 	return registry
 }
 
-// startLogin runs after the person approved consent. With one redirect method
-// it goes straight to that provider; otherwise it sends the browser to the
-// login page, which lets them pick. The pending request is saved again under
-// a fresh id because consent consumed the one it arrived with.
+// loginRecordKey namespaces a login page id in the store. Consent ids, login
+// ids and upstream states share one table, and an id from one stage must never
+// be accepted at another: a consent id from /authorize, used as a login id,
+// would skip consent. Upstream states are separate because they always carry a
+// "." and consent and login ids never do.
+func loginRecordKey(id string) string { return "login:" + id }
+
+// Browser binding. Whoever approves consent is the person the sign-in is for.
+// Without a link between that browser and the sign-in, anyone could approve
+// consent for their own client, then send a victim the login link: the victim
+// signs in on the real server and the code goes to the attacker. So approving
+// consent sets a random value in an HttpOnly cookie, only its hash is stored
+// with the pending request, and the login form and the provider callback both
+// require the cookie. One cookie per sign-in, named from that sign-in's id, so
+// two tabs or two clients do not overwrite each other.
+
+func (s *Server) loginCookieSecure() bool {
+	return strings.HasPrefix(strings.ToLower(s.Config.Issuer), "https://")
+}
+
+func (s *Server) loginCookieName(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	name := "mcp_auth_login_" + hex.EncodeToString(sum[:6])
+	if s.loginCookieSecure() {
+		return "__Host-" + name
+	}
+	return name
+}
+
+func (s *Server) setLoginBinding(w http.ResponseWriter, id, binding string, expires time.Time) {
+	maxAge := int(expires.Sub(s.now()).Seconds())
+	if maxAge < 1 {
+		maxAge = 1
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: s.loginCookieName(id), Value: binding, Path: "/", MaxAge: maxAge,
+		HttpOnly: true, Secure: s.loginCookieSecure(), SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func (s *Server) clearLoginBinding(w http.ResponseWriter, id string) {
+	http.SetCookie(w, &http.Cookie{
+		Name: s.loginCookieName(id), Value: "", Path: "/", MaxAge: -1,
+		HttpOnly: true, Secure: s.loginCookieSecure(), SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func (s *Server) presentedBinding(r *http.Request, id string) string {
+	cookie, err := r.Cookie(s.loginCookieName(id))
+	if err != nil || len(cookie.Value) > maxLoginIDBytes {
+		return ""
+	}
+	return cookie.Value
+}
+
+// bindingMatches reports whether the browser's value is the one consent was
+// approved with. An empty stored binding never matches.
+func bindingMatches(presented string, pending ConsentRequest) bool {
+	stored := pending.Request.LoginBinding
+	if presented == "" || stored == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(HashSecret(presented)), []byte(stored)) == 1
+}
+
+// rejectUnboundLogin puts the request back, so a request from the wrong
+// browser cannot use up the right browser's sign-in, and answers as expired.
+func (s *Server) rejectUnboundLogin(w http.ResponseWriter, pending ConsentRequest, stage string) {
+	_ = s.Store.SaveConsentRequest(pending)
+	s.Audit.Event("login", "failure", map[string]any{"reason": "browser_binding_mismatch", "stage": stage})
+	s.writeExpiredLogin(w)
+}
+
+// startLogin runs after the person approved consent. It starts the sign-in
+// window (loginTTL, never restarted afterwards), binds it to this browser, and
+// either goes straight to the only provider or shows the login page. The
+// pending request is saved again because consent consumed the one it arrived
+// with.
 func (s *Server) startLogin(w http.ResponseWriter, r *http.Request, registry *LoginRegistry, pending ConsentRequest) {
+	binding := randomID()
+	pending.Request.LoginBinding = HashSecret(binding)
+	pending.ExpiresAt = s.now().Add(s.Config.loginTTL())
 	if entry, ok := registry.single(); ok {
 		if _, redirect := entry.Method.(RedirectLoginMethod); redirect {
-			s.beginRedirectLogin(w, r, entry, pending)
+			s.beginRedirectLogin(w, r, entry, pending, binding)
 			return
 		}
 	}
 	loginID := randomID()
-	if err := s.Store.SaveConsentRequest(ConsentRequest{
-		ValueHash: HashSecret(loginID), Request: pending.Request, Nonce: pending.Nonce,
-		ExpiresAt: s.now().Add(s.Config.loginTTL()),
-	}); err != nil {
+	pending.ValueHash = HashSecret(loginRecordKey(loginID))
+	if err := s.Store.SaveConsentRequest(pending); err != nil {
 		oauthError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
+	s.setLoginBinding(w, loginID, binding, pending.ExpiresAt)
 	http.Redirect(w, r, s.Config.LoginEndpoint()+"?"+url.Values{"login_id": {loginID}}.Encode(), http.StatusSeeOther)
 }
 
 // beginRedirectLogin sends the browser to the method's provider. The upstream
 // state carries the method id so the callback can find the method again; the
-// whole state is the lookup key, so changing the prefix finds nothing.
-func (s *Server) beginRedirectLogin(w http.ResponseWriter, r *http.Request, entry LoginEntry, pending ConsentRequest) {
+// whole state is the lookup key, so changing the prefix finds nothing. The
+// sign-in keeps the expiry it already had.
+func (s *Server) beginRedirectLogin(w http.ResponseWriter, r *http.Request, entry LoginEntry, pending ConsentRequest, binding string) {
 	method := entry.Method.(RedirectLoginMethod)
 	request := pending.Request
 	state := method.ID() + "." + randomID()
@@ -62,17 +143,18 @@ func (s *Server) beginRedirectLogin(w http.ResponseWriter, r *http.Request, entr
 	}
 	if err := s.Store.SaveConsentRequest(ConsentRequest{
 		ValueHash: HashSecret(state), Request: request, Nonce: pending.Nonce,
-		ExpiresAt: s.now().Add(s.Config.loginTTL()), CodeVerifier: codeVerifier,
+		ExpiresAt: pending.ExpiresAt, CodeVerifier: codeVerifier,
 	}); err != nil {
 		oauthError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
+	s.setLoginBinding(w, state, binding, pending.ExpiresAt)
 	http.Redirect(w, r, location, http.StatusSeeOther)
 }
 
 // loginPage renders the method picker. It cannot check the pending request
-// without consuming it, so an expired id is only reported when a method is
-// chosen.
+// without consuming it, so an expired or unbound id is only reported when a
+// method is chosen.
 func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
 	registry := s.loginRegistry()
 	if registry == nil {
@@ -110,27 +192,33 @@ func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
 		s.writeExpiredLogin(w)
 		return
 	}
-	pending, err := s.Store.ConsumeConsentRequest(loginID, s.now())
+	pending, err := s.Store.ConsumeConsentRequest(loginRecordKey(loginID), s.now())
 	if err != nil {
 		s.writeExpiredLogin(w)
 		return
 	}
+	binding := s.presentedBinding(r, loginID)
+	if !bindingMatches(binding, pending) {
+		s.rejectUnboundLogin(w, pending, "login")
+		return
+	}
 	switch method := entry.Method.(type) {
 	case RedirectLoginMethod:
-		s.beginRedirectLogin(w, r, entry, pending)
+		s.clearLoginBinding(w, loginID)
+		s.beginRedirectLogin(w, r, entry, pending, binding)
 	case CredentialLoginMethod:
-		s.attemptCredentialLogin(w, r, registry, entry, method, pending)
+		s.attemptCredentialLogin(w, r, registry, entry, method, pending, loginID, binding)
 	}
 }
 
-func (s *Server) attemptCredentialLogin(w http.ResponseWriter, r *http.Request, registry *LoginRegistry, entry LoginEntry, method CredentialLoginMethod, pending ConsentRequest) {
+func (s *Server) attemptCredentialLogin(w http.ResponseWriter, r *http.Request, registry *LoginRegistry, entry LoginEntry, method CredentialLoginMethod, pending ConsentRequest, loginID, binding string) {
 	fields := method.Fields()
 	values := make(map[string]string, len(fields))
 	account := ""
 	for _, field := range fields {
 		value := r.PostFormValue(field.Name)
 		if len(value) > maxLoginFieldBytes {
-			s.retryLogin(w, registry, method, pending, http.StatusUnauthorized, "Sign-in failed. Check your details and try again.", nil)
+			s.retryLogin(w, registry, method, pending, loginID, binding, http.StatusUnauthorized, "Sign-in failed. Check your details and try again.", nil)
 			return
 		}
 		values[field.Name] = value
@@ -138,11 +226,12 @@ func (s *Server) attemptCredentialLogin(w http.ResponseWriter, r *http.Request, 
 			account = value
 		}
 	}
-	now := s.now()
-	key := loginLimiterKey(method.ID(), account)
-	if !registry.limiter.allow(key, now) {
+	// The attempt is counted before the directory is asked, so requests sent
+	// in parallel cannot all pass the check while the first is still waiting.
+	ticket, allowed := registry.limiter.reserve(loginLimiterKey(method.ID(), account), s.now())
+	if !allowed {
 		s.Audit.Event("login", "failure", map[string]any{"method": method.ID(), "reason": "throttled"})
-		s.retryLogin(w, registry, method, pending, http.StatusTooManyRequests, "Too many failed attempts. Wait a few minutes and try again.", values)
+		s.retryLogin(w, registry, method, pending, loginID, binding, http.StatusTooManyRequests, "Too many failed attempts. Wait a few minutes and try again.", values)
 		return
 	}
 	request := pending.Request
@@ -151,37 +240,42 @@ func (s *Server) attemptCredentialLogin(w http.ResponseWriter, r *http.Request, 
 	}, LoginAttempt{Values: values, RemoteAddr: remoteHost(r)})
 	if err != nil {
 		if errors.Is(err, ErrInvalidCredentials) {
-			registry.limiter.fail(key, now)
+			// The reservation stays: a wrong password is what is being counted.
 			s.Audit.Event("login", "failure", map[string]any{"method": method.ID(), "reason": "invalid_credentials"})
-			s.retryLogin(w, registry, method, pending, http.StatusUnauthorized, "Sign-in failed. Check your details and try again.", values)
+			s.retryLogin(w, registry, method, pending, loginID, binding, http.StatusUnauthorized, "Sign-in failed. Check your details and try again.", values)
 			return
 		}
+		// The password was never tested, so this attempt does not count.
+		ticket.abandon()
 		s.Audit.Event("login", "failure", map[string]any{"method": method.ID(), "reason": err.Error()})
-		s.retryLogin(w, registry, method, pending, http.StatusServiceUnavailable, "Sign-in is temporarily unavailable. Try again shortly.", values)
+		s.retryLogin(w, registry, method, pending, loginID, binding, http.StatusServiceUnavailable, "Sign-in is temporarily unavailable. Try again shortly.", values)
 		return
 	}
 	identity, err = entry.qualify(identity)
 	if err != nil {
+		ticket.abandon()
 		s.Audit.Event("login", "failure", map[string]any{"method": method.ID(), "reason": err.Error()})
 		oauthError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
-	registry.limiter.reset(key)
+	ticket.success()
 	s.Audit.Event("login", "success", map[string]any{"method": method.ID()})
+	s.clearLoginBinding(w, loginID)
 	s.completeAuthorization(w, r, pending, identity)
 }
 
 // retryLogin shows the form again after a failed attempt. The pending request
 // was consumed to make the attempt, so it is saved under a new id with its
 // original expiry: a failure never extends the time allowed to sign in.
-func (s *Server) retryLogin(w http.ResponseWriter, registry *LoginRegistry, method CredentialLoginMethod, pending ConsentRequest, status int, message string, values map[string]string) {
+func (s *Server) retryLogin(w http.ResponseWriter, registry *LoginRegistry, method CredentialLoginMethod, pending ConsentRequest, oldID, binding string, status int, message string, values map[string]string) {
 	loginID := randomID()
-	if err := s.Store.SaveConsentRequest(ConsentRequest{
-		ValueHash: HashSecret(loginID), Request: pending.Request, Nonce: pending.Nonce, ExpiresAt: pending.ExpiresAt,
-	}); err != nil {
+	pending.ValueHash = HashSecret(loginRecordKey(loginID))
+	if err := s.Store.SaveConsentRequest(pending); err != nil {
 		oauthError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
+	s.clearLoginBinding(w, oldID)
+	s.setLoginBinding(w, loginID, binding, pending.ExpiresAt)
 	s.renderLogin(w, status, registry, loginID, message, method.ID(), values)
 }
 
@@ -215,7 +309,7 @@ func (s *Server) renderLogin(w http.ResponseWriter, status int, registry *LoginR
 }
 
 // registryCallback completes a redirect login. The state names the method
-// that started it.
+// that started it, and the browser must be the one that approved consent.
 func (s *Server) registryCallback(w http.ResponseWriter, r *http.Request, registry *LoginRegistry) {
 	state := r.URL.Query().Get("state")
 	methodID, _, found := strings.Cut(state, ".")
@@ -230,6 +324,13 @@ func (s *Server) registryCallback(w http.ResponseWriter, r *http.Request, regist
 		http.Error(w, "identity state is invalid or expired", http.StatusBadRequest)
 		return
 	}
+	if !bindingMatches(s.presentedBinding(r, state), pending) {
+		_ = s.Store.SaveConsentRequest(pending)
+		s.Audit.Event("login", "failure", map[string]any{"method": methodID, "reason": "browser_binding_mismatch", "stage": "callback"})
+		http.Error(w, "identity state is invalid or expired", http.StatusBadRequest)
+		return
+	}
+	s.clearLoginBinding(w, state)
 	if upstreamError := r.URL.Query().Get("error"); upstreamError != "" {
 		s.Audit.Event("login", "failure", map[string]any{"method": methodID, "reason": "upstream_error", "error_type": upstreamError})
 		redirectError(w, r, pending.Request, "access_denied", "upstream identity authentication failed", s.Config.Issuer, s.Config.AuthorizationResponseIssuer)

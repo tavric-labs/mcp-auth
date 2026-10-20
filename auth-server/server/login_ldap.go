@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-ldap/ldap/v3"
 )
@@ -21,6 +23,9 @@ const (
 	// ldapMaxUsername and ldapMaxPassword bound what is sent to the directory.
 	ldapMaxUsername = 256
 	ldapMaxPassword = 1024
+	// ldapMaxConcurrent bounds simultaneous directory connections per method,
+	// so a flood of sign-in attempts cannot exhaust the directory.
+	ldapMaxConcurrent = 16
 	// ldapUsernamePlaceholder is replaced by the escaped account name in
 	// user_filter and user_dn_template.
 	ldapUsernamePlaceholder = "{username}"
@@ -84,6 +89,7 @@ type LDAPLoginMethod struct {
 	config       LDAPConfig
 	bindPassword string
 	dial         ldapDialer
+	slots        chan struct{}
 }
 
 // NewLDAPLoginMethod validates the configuration and prepares the method. It
@@ -92,7 +98,7 @@ func NewLDAPLoginMethod(config LDAPConfig, allowInsecure bool) (*LDAPLoginMethod
 	if err := config.validate(allowInsecure); err != nil {
 		return nil, fmt.Errorf("ldap login method %q: %w", config.ID, err)
 	}
-	method := &LDAPLoginMethod{config: config}
+	method := &LDAPLoginMethod{config: config, slots: make(chan struct{}, ldapMaxConcurrent)}
 	if config.BindPasswordEnv != "" {
 		method.bindPassword = os.Getenv(config.BindPasswordEnv)
 		if method.bindPassword == "" {
@@ -103,7 +109,7 @@ func NewLDAPLoginMethod(config LDAPConfig, allowInsecure bool) (*LDAPLoginMethod
 	if err != nil {
 		return nil, fmt.Errorf("ldap login method %q: %w", config.ID, err)
 	}
-	method.dial = func(context.Context) (ldapConn, error) { return dialLDAP(config, tlsConfig) }
+	method.dial = func(ctx context.Context) (ldapConn, error) { return dialLDAP(ctx, config, tlsConfig) }
 	return method, nil
 }
 
@@ -171,22 +177,50 @@ func (c LDAPConfig) tlsConfig() (*tls.Config, error) {
 	return config, nil
 }
 
-func dialLDAP(config LDAPConfig, tlsConfig *tls.Config) (ldapConn, error) {
-	options := []ldap.DialOpt{ldap.DialWithDialer(&net.Dialer{Timeout: ldapDialTimeout})}
-	if strings.HasPrefix(config.URL, "ldaps://") {
-		options = append(options, ldap.DialWithTLSConfig(tlsConfig))
-	}
-	conn, err := ldap.DialURL(config.URL, options...)
+// dialLDAP connects with its own deadlines. One deadline covers the TCP
+// connect, the TLS handshake and the StartTLS exchange, because the library
+// applies its operation timeout only after a connection exists, and a
+// directory that accepts the connection and then stalls would otherwise hold
+// the request open indefinitely.
+func dialLDAP(ctx context.Context, config LDAPConfig, tlsConfig *tls.Config) (ldapConn, error) {
+	parsed, err := url.Parse(config.URL)
 	if err != nil {
 		return nil, err
 	}
-	conn.SetTimeout(ldapOpTimeout)
-	if config.StartTLS {
-		if err := conn.StartTLS(tlsConfig); err != nil {
-			_ = conn.Close()
-			return nil, err
+	secure := parsed.Scheme == "ldaps"
+	port := parsed.Port()
+	if port == "" {
+		port = "389"
+		if secure {
+			port = "636"
 		}
 	}
+	raw, err := (&net.Dialer{Timeout: ldapDialTimeout}).DialContext(ctx, "tcp", net.JoinHostPort(parsed.Hostname(), port))
+	if err != nil {
+		return nil, err
+	}
+	_ = raw.SetDeadline(time.Now().Add(ldapDialTimeout + ldapOpTimeout))
+	var conn *ldap.Conn
+	if secure {
+		tlsConn := tls.Client(raw, tlsConfig)
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = raw.Close()
+			return nil, err
+		}
+		conn = ldap.NewConn(tlsConn, true)
+		conn.Start()
+	} else {
+		conn = ldap.NewConn(raw, false)
+		conn.Start()
+		if config.StartTLS {
+			if err := conn.StartTLS(tlsConfig); err != nil {
+				_ = conn.Close()
+				return nil, err
+			}
+		}
+	}
+	_ = raw.SetDeadline(time.Time{})
+	conn.SetTimeout(ldapOpTimeout)
 	return conn, nil
 }
 
@@ -223,11 +257,20 @@ func (m *LDAPLoginMethod) Authenticate(ctx context.Context, _ IdentityRequest, a
 		strings.ContainsAny(username, "\x00\r\n") || strings.ContainsRune(password, 0) {
 		return Identity{}, ErrInvalidCredentials
 	}
+	select {
+	case m.slots <- struct{}{}:
+		defer func() { <-m.slots }()
+	case <-ctx.Done():
+		return Identity{}, ctx.Err()
+	}
 	conn, err := m.dial(ctx)
 	if err != nil {
 		return Identity{}, fmt.Errorf("connect to directory: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
+	// The library cannot be interrupted, so a cancelled request closes the
+	// connection out from under it.
+	defer context.AfterFunc(ctx, func() { _ = conn.Close() })()
 
 	attributes := m.attributes()
 	var entry *ldap.Entry
@@ -294,16 +337,19 @@ func (m *LDAPLoginMethod) findEntry(conn ldapConn, username string, attributes [
 	}
 }
 
+// readEntry reads the signed-in person's own entry after a direct bind. It is
+// always read, even when only the DN is wanted: the DN built from the typed
+// name keeps the typed spelling ("Alice" and "alice" are one account on a
+// directory that matches DNs case-insensitively), and using it as the subject
+// would give one person several. The entry returned by the directory carries
+// the canonical DN.
 func (m *LDAPLoginMethod) readEntry(conn ldapConn, dn string, attributes []string) (*ldap.Entry, error) {
-	if m.config.SubjectAttribute == "dn" && len(m.config.Claims) == 0 {
-		return &ldap.Entry{DN: dn}, nil
-	}
 	result, err := conn.Search(ldap.NewSearchRequest(
 		dn, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
 		1, int(ldapOpTimeout.Seconds()), false, "(objectClass=*)", attributes, nil,
 	))
 	if err != nil || len(result.Entries) != 1 {
-		return nil, errors.New("read the signed-in entry's attributes")
+		return nil, errors.New("read the signed-in entry (the account must be allowed to read its own entry)")
 	}
 	return result.Entries[0], nil
 }
@@ -328,10 +374,13 @@ func bindAsUser(conn ldapConn, dn, password string) error {
 func (m *LDAPLoginMethod) identity(entry *ldap.Entry) (Identity, error) {
 	subject := entry.DN
 	if m.config.SubjectAttribute != "dn" {
-		subject = strings.TrimSpace(entry.GetAttributeValue(m.config.SubjectAttribute))
+		var err error
+		if subject, err = ldapSubjectValue(entry, m.config.SubjectAttribute); err != nil {
+			return Identity{}, err
+		}
 	}
-	if subject == "" {
-		return Identity{}, fmt.Errorf("entry has no %q attribute to use as the subject", m.config.SubjectAttribute)
+	if strings.TrimSpace(subject) == "" {
+		return Identity{}, fmt.Errorf("entry has no %q value to use as the subject", m.config.SubjectAttribute)
 	}
 	claims := map[string]any{}
 	for claim, attribute := range m.config.Claims {
@@ -340,4 +389,26 @@ func (m *LDAPLoginMethod) identity(entry *ldap.Entry) (Identity, error) {
 		}
 	}
 	return Identity{Subject: subject, Claims: claims}, nil
+}
+
+// ldapSubjectValue returns the subject attribute exactly as stored. It insists
+// on one value, because picking the first of several is arbitrary, and it does
+// not trim, because the value is an identifier. A binary value (Active
+// Directory's objectGUID, for one) or one that is not printable text is
+// encoded as "hex:" plus its bytes in lowercase hex: converting arbitrary
+// bytes to a string would make distinct values collide when the subject is
+// later written as JSON.
+func ldapSubjectValue(entry *ldap.Entry, attribute string) (string, error) {
+	values := entry.GetRawAttributeValues(attribute)
+	if len(values) != 1 {
+		return "", fmt.Errorf("subject attribute %q must have exactly one value, found %d", attribute, len(values))
+	}
+	raw := values[0]
+	if len(raw) == 0 {
+		return "", fmt.Errorf("subject attribute %q is empty", attribute)
+	}
+	if !utf8.Valid(raw) || strings.IndexFunc(string(raw), func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return "hex:" + hex.EncodeToString(raw), nil
+	}
+	return string(raw), nil
 }

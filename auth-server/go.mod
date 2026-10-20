@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/go-ldap/ldap/v3 v3.4.15
+	golang.org/x/text v0.43.0
 	modernc.org/sqlite v1.34.5
 )
 

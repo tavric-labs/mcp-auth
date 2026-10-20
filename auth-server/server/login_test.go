@@ -24,8 +24,10 @@ type fakeCredentialMethod struct {
 	password string
 	// failWith, when set, is returned instead of checking the password.
 	failWith error
-	mu       sync.Mutex
-	calls    int
+	// delay simulates directory latency.
+	delay time.Duration
+	mu    sync.Mutex
+	calls int
 }
 
 func (m *fakeCredentialMethod) ID() string    { return m.id }
@@ -37,6 +39,7 @@ func (m *fakeCredentialMethod) Authenticate(_ context.Context, _ IdentityRequest
 	m.mu.Lock()
 	m.calls++
 	m.mu.Unlock()
+	time.Sleep(m.delay)
 	if m.failWith != nil {
 		return Identity{}, m.failWith
 	}
@@ -83,10 +86,46 @@ func loginTestServer(t *testing.T, entries ...LoginEntry) *Server {
 	return instance
 }
 
-func serve(instance *Server, request *http.Request) *httptest.ResponseRecorder {
+// browser holds cookies the way a real one does: it sends back what it was
+// given and drops what the server expires.
+type browser struct {
+	mu      sync.Mutex
+	cookies map[string]*http.Cookie
+}
+
+func newBrowser() *browser { return &browser{cookies: map[string]*http.Cookie{}} }
+
+func (b *browser) do(instance *Server, request *http.Request) *httptest.ResponseRecorder {
+	b.mu.Lock()
+	for _, cookie := range b.cookies {
+		request.AddCookie(cookie)
+	}
+	b.mu.Unlock()
 	recorder := httptest.NewRecorder()
 	instance.Handler().ServeHTTP(recorder, request)
+	b.mu.Lock()
+	for _, cookie := range recorder.Result().Cookies() {
+		if cookie.MaxAge < 0 {
+			delete(b.cookies, cookie.Name)
+		} else {
+			b.cookies[cookie.Name] = cookie
+		}
+	}
+	b.mu.Unlock()
 	return recorder
+}
+
+// defaultBrowsers gives each test server one browser, so most tests read as
+// one person signing in. Attack tests use a second browser explicitly.
+var defaultBrowsers sync.Map
+
+func defaultBrowser(instance *Server) *browser {
+	loaded, _ := defaultBrowsers.LoadOrStore(instance, newBrowser())
+	return loaded.(*browser)
+}
+
+func serve(instance *Server, request *http.Request) *httptest.ResponseRecorder {
+	return defaultBrowser(instance).do(instance, request)
 }
 
 func postForm(path string, values url.Values) *http.Request {
@@ -444,16 +483,102 @@ func TestLoginLimiterBoundsMemory(t *testing.T) {
 	limiter := newLoginLimiter()
 	now := time.Now()
 	for i := 0; i < loginLimiterCapacity+500; i++ {
-		limiter.fail(loginLimiterKey("corp", fmt.Sprintf("user-%d", i)), now)
+		if _, ok := limiter.reserve(loginLimiterKey("corp", fmt.Sprintf("user-%d", i)), now); !ok {
+			t.Fatalf("a first attempt on a new account was refused (account %d)", i)
+		}
 	}
-	if got := len(limiter.failures); got > loginLimiterCapacity {
+	if got := len(limiter.attempts); got > loginLimiterCapacity {
 		t.Fatalf("limiter holds %d keys, capacity is %d", got, loginLimiterCapacity)
 	}
-	// Failures age out of the window.
+	// Attempts age out of the window.
 	key := loginLimiterKey("corp", "old")
-	limiter.fail(key, now.Add(-2*loginWindow))
-	if !limiter.allow(key, now) {
-		t.Fatal("an expired failure still counts")
+	for i := 0; i < loginMaxFailures; i++ {
+		limiter.reserve(key, now.Add(-2*loginWindow))
+	}
+	if _, ok := limiter.reserve(key, now); !ok {
+		t.Fatal("expired attempts still count")
+	}
+}
+
+// When the limiter is full it drops the account whose latest attempt is
+// oldest, so a lock that was just earned is the last to go.
+func TestLoginLimiterEvictsTheOldestAccountNotAFreshLock(t *testing.T) {
+	limiter := newLoginLimiter()
+	now := time.Now()
+	locked := loginLimiterKey("corp", "victim")
+	for i := 0; i < loginMaxFailures; i++ {
+		limiter.reserve(locked, now)
+	}
+	for i := 0; i < loginLimiterCapacity+100; i++ {
+		limiter.reserve(loginLimiterKey("corp", fmt.Sprintf("filler-%d", i)), now.Add(-time.Duration(1+i%100)*time.Second))
+	}
+	if _, ok := limiter.reserve(locked, now); ok {
+		t.Fatal("filling the limiter evicted a fresh lock")
+	}
+}
+
+func TestLoginLimiterReservationsAreAtomic(t *testing.T) {
+	limiter := newLoginLimiter()
+	now := time.Now()
+	key := loginLimiterKey("corp", "alice")
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	granted := 0
+	for i := 0; i < 200; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, ok := limiter.reserve(key, now); ok {
+				mu.Lock()
+				granted++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if granted != loginMaxFailures {
+		t.Fatalf("%d concurrent attempts were granted, want exactly %d", granted, loginMaxFailures)
+	}
+}
+
+func TestLoginLimiterAbandonAndSuccess(t *testing.T) {
+	limiter := newLoginLimiter()
+	now := time.Now()
+	key := loginLimiterKey("corp", "alice")
+	var tickets []loginTicket
+	for i := 0; i < loginMaxFailures; i++ {
+		ticket, ok := limiter.reserve(key, now)
+		if !ok {
+			t.Fatal("refused under the limit")
+		}
+		tickets = append(tickets, ticket)
+	}
+	if _, ok := limiter.reserve(key, now); ok {
+		t.Fatal("limit not enforced")
+	}
+	tickets[0].abandon()
+	ticket, ok := limiter.reserve(key, now)
+	if !ok {
+		t.Fatal("an abandoned attempt still counted")
+	}
+	ticket.success()
+	if _, ok := limiter.reserve(key, now); !ok || len(limiter.attempts[key]) != 1 {
+		t.Fatal("success did not clear the account")
+	}
+}
+
+func TestLoginAccountNormalization(t *testing.T) {
+	base := loginLimiterKey("corp", "alice")
+	for _, alias := range []string{"alice", "Alice", "ALICE", " alice", "alice ", "\talice\n", " alice ", "ａｌｉｃｅ", "ＡＬＩＣＥ"} {
+		if got := loginLimiterKey("corp", alias); got != base {
+			t.Errorf("%q is a different account to the limiter", alias)
+		}
+	}
+	if loginLimiterKey("corp", "bob") == base || loginLimiterKey("other", "alice") == base {
+		t.Error("distinct accounts or methods share a key")
+	}
+	if normalizeLoginAccount("a   b	c") != "a b c" {
+		t.Errorf("inner whitespace not collapsed: %q", normalizeLoginAccount("a   b	c"))
 	}
 }
 
@@ -501,4 +626,305 @@ func TestSuccessfulLoginClearsTheFailureCount(t *testing.T) {
 	}
 	// Without the reset, these would sit on top of the earlier failures and lock the account.
 	failTimes(loginMaxFailures - 1)
+}
+
+// authorizeAndApprove runs /authorize and the consent approval in the given
+// browser and returns the response to the approval.
+func authorizeAndApprove(t *testing.T, instance *Server, b *browser) *httptest.ResponseRecorder {
+	t.Helper()
+	digest := sha256.Sum256([]byte("verifier-1234567890"))
+	challenge := base64.RawURLEncoding.EncodeToString(digest[:])
+	page := b.do(instance, httptest.NewRequest(http.MethodGet, "/authorize?response_type=code&client_id=client&redirect_uri=http%3A%2F%2Flocalhost%3A9999%2Fcallback&code_challenge="+url.QueryEscape(challenge)+"&code_challenge_method=S256&resource=http%3A%2F%2Flocalhost%3A8081%2Fmcp&scope=tools%3Aread&state=client-state", nil))
+	match := consentIDPattern.FindStringSubmatch(page.Body.String())
+	if match == nil {
+		t.Fatalf("no consent page: %d", page.Code)
+	}
+	return b.do(instance, postForm("/authorize/consent", url.Values{"consent_id": {match[1]}, "decision": {"approve"}}))
+}
+
+func loginIDFromRedirect(t *testing.T, response *httptest.ResponseRecorder) string {
+	t.Helper()
+	location, err := url.Parse(response.Header().Get("Location"))
+	if err != nil || location.Query().Get("login_id") == "" {
+		t.Fatalf("no login id in redirect %q (status %d)", response.Header().Get("Location"), response.Code)
+	}
+	return location.Query().Get("login_id")
+}
+
+// Consent ids, login ids and upstream states share one table. A consent id from
+// /authorize, never approved, must not be accepted as a login id.
+func TestConsentIDIsNotAcceptedAsALoginID(t *testing.T) {
+	method, entry := credentialEntry()
+	instance := loginTestServer(t, entry)
+	attacker := newBrowser()
+	digest := sha256.Sum256([]byte("verifier-1234567890"))
+	page := attacker.do(instance, httptest.NewRequest(http.MethodGet, "/authorize?response_type=code&client_id=client&redirect_uri=http%3A%2F%2Flocalhost%3A9999%2Fcallback&code_challenge="+url.QueryEscape(base64.RawURLEncoding.EncodeToString(digest[:]))+"&code_challenge_method=S256&resource=http%3A%2F%2Flocalhost%3A8081%2Fmcp&scope=tools%3Aread", nil))
+	consentID := consentIDPattern.FindStringSubmatch(page.Body.String())[1]
+
+	victim := newBrowser()
+	response := victim.do(instance, postForm("/login/corp", url.Values{"login_id": {consentID}, "username": {"alice"}, "password": {"correct horse"}}))
+	if response.Code != http.StatusBadRequest || method.calls != 0 {
+		t.Fatalf("a consent id worked as a login id: status %d, method calls %d, location %q", response.Code, method.calls, response.Header().Get("Location"))
+	}
+	// The same, from the browser that holds the consent page.
+	response = attacker.do(instance, postForm("/login/corp", url.Values{"login_id": {consentID}, "username": {"alice"}, "password": {"correct horse"}}))
+	if response.Code != http.StatusBadRequest || method.calls != 0 {
+		t.Fatalf("consent was skipped: status %d, method calls %d", response.Code, method.calls)
+	}
+}
+
+// Someone who approved consent for their own client must not be able to hand
+// the login link to a victim and collect the victim's authorization code.
+func TestLoginRequiresTheBrowserThatApprovedConsent(t *testing.T) {
+	method, entry := credentialEntry()
+	instance := loginTestServer(t, entry)
+	attacker, victim := newBrowser(), newBrowser()
+	loginID := loginIDFromRedirect(t, authorizeAndApprove(t, instance, attacker))
+
+	page := victim.do(instance, httptest.NewRequest(http.MethodGet, "/login?login_id="+loginID, nil))
+	if page.Code != http.StatusOK {
+		t.Fatalf("login page status %d", page.Code)
+	}
+	response := victim.do(instance, postForm("/login/corp", url.Values{"login_id": {loginID}, "username": {"alice"}, "password": {"correct horse"}}))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("a different browser signed in: %d %s", response.Code, response.Header().Get("Location"))
+	}
+	if method.calls != 0 {
+		t.Fatal("the victim's password was tried against the directory")
+	}
+	// The wrong browser did not use up the right browser's sign-in.
+	response = attacker.do(instance, postForm("/login/corp", url.Values{"login_id": {loginID}, "username": {"alice"}, "password": {"correct horse"}}))
+	if !strings.HasPrefix(response.Header().Get("Location"), "http://localhost:9999/callback?code=") {
+		t.Fatalf("the original browser could no longer sign in: %d", response.Code)
+	}
+}
+
+func TestLoginRejectsAForgedOrStaleBindingCookie(t *testing.T) {
+	_, entry := credentialEntry()
+	instance := loginTestServer(t, entry)
+	b := newBrowser()
+	loginID := loginIDFromRedirect(t, authorizeAndApprove(t, instance, b))
+	name := instance.loginCookieName(loginID)
+	genuine := b.cookies[name]
+	if genuine == nil {
+		t.Fatalf("no binding cookie set; have %v", b.cookies)
+	}
+	for label, value := range map[string]string{"garbage": "not-the-value", "empty": "", "the id itself": loginID, "its hash": HashSecret(genuine.Value)} {
+		forged := newBrowser()
+		forged.cookies[name] = &http.Cookie{Name: name, Value: value}
+		if got := forged.do(instance, postForm("/login/corp", url.Values{"login_id": {loginID}, "username": {"alice"}, "password": {"correct horse"}})); got.Code != http.StatusBadRequest {
+			t.Errorf("%s binding accepted: %d", label, got.Code)
+		}
+	}
+	// A cookie for a different sign-in does not carry over.
+	other := newBrowser()
+	otherID := loginIDFromRedirect(t, authorizeAndApprove(t, instance, other))
+	mixed := newBrowser()
+	mixed.cookies[name] = &http.Cookie{Name: name, Value: other.cookies[instance.loginCookieName(otherID)].Value}
+	if got := mixed.do(instance, postForm("/login/corp", url.Values{"login_id": {loginID}, "username": {"alice"}, "password": {"correct horse"}})); got.Code != http.StatusBadRequest {
+		t.Errorf("another sign-in's binding was accepted: %d", got.Code)
+	}
+}
+
+func TestProviderCallbackRequiresTheBrowserThatStartedTheLogin(t *testing.T) {
+	instance := loginTestServer(t, LoginEntry{Method: &fakeRedirectMethod{id: "github"}, SubjectPrefix: "github:"})
+	attacker, victim := newBrowser(), newBrowser()
+	location, _ := url.Parse(authorizeAndApprove(t, instance, attacker).Header().Get("Location"))
+	state := location.Query().Get("state")
+	callback := "/identity/callback?code=good&state=" + url.QueryEscape(state)
+
+	if got := victim.do(instance, httptest.NewRequest(http.MethodGet, callback, nil)); got.Code != http.StatusBadRequest {
+		t.Fatalf("a different browser completed the provider login: %d %s", got.Code, got.Header().Get("Location"))
+	}
+	got := attacker.do(instance, httptest.NewRequest(http.MethodGet, callback, nil))
+	if !strings.HasPrefix(got.Header().Get("Location"), "http://localhost:9999/callback?code=") {
+		t.Fatalf("the original browser could no longer finish: %d", got.Code)
+	}
+}
+
+func TestBindingCookieAttributesAndCleanup(t *testing.T) {
+	_, entry := credentialEntry()
+	for _, tc := range []struct {
+		issuer     string
+		secure     bool
+		hostPrefix bool
+	}{{"http://localhost:8080", false, false}, {"https://auth.example.com", true, true}} {
+		instance := loginTestServer(t, entry)
+		instance.Config.Issuer = tc.issuer
+		b := newBrowser()
+		response := authorizeAndApprove(t, instance, b)
+		cookies := response.Result().Cookies()
+		if len(cookies) != 1 {
+			t.Fatalf("%s: %d cookies set, want 1", tc.issuer, len(cookies))
+		}
+		cookie := cookies[0]
+		if !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode || cookie.Path != "/" || cookie.Secure != tc.secure || cookie.MaxAge <= 0 {
+			t.Errorf("%s: cookie attributes = %+v", tc.issuer, cookie)
+		}
+		if strings.HasPrefix(cookie.Name, "__Host-") != tc.hostPrefix {
+			t.Errorf("%s: cookie name %q", tc.issuer, cookie.Name)
+		}
+		if cookie.Value == "" || strings.Contains(response.Header().Get("Location"), cookie.Value) {
+			t.Errorf("%s: the binding must be random and must not appear in the URL", tc.issuer)
+		}
+	}
+	// The cookie is removed once the sign-in completes.
+	instance := loginTestServer(t, entry)
+	b := newBrowser()
+	loginID := loginIDFromRedirect(t, authorizeAndApprove(t, instance, b))
+	b.do(instance, postForm("/login/corp", url.Values{"login_id": {loginID}, "username": {"alice"}, "password": {"correct horse"}}))
+	if len(b.cookies) != 0 {
+		t.Fatalf("binding cookies left behind after sign-in: %v", b.cookies)
+	}
+}
+
+// Spellings a directory treats as one account must share one lockout.
+func TestThrottleCannotBeSidesteppedWithAccountAliases(t *testing.T) {
+	method, entry := credentialEntry()
+	instance := loginTestServer(t, entry)
+	loginID := loginPageID(t, instance)
+	aliases := []string{"alice", "alice ", " alice", "ALICE", " Alice", "ａlice", "alice\t"}
+	for attempt, alias := range aliases[:loginMaxFailures] {
+		response := serve(instance, postForm("/login/corp", url.Values{"login_id": {loginID}, "username": {alias}, "password": {"wrong"}}))
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d (%q): status %d", attempt+1, alias, response.Code)
+		}
+		loginID = loginIDPattern.FindStringSubmatch(response.Body.String())[1]
+	}
+	before := method.calls
+	for _, alias := range aliases[loginMaxFailures:] {
+		response := serve(instance, postForm("/login/corp", url.Values{"login_id": {loginID}, "username": {alias}, "password": {"wrong"}}))
+		if response.Code != http.StatusTooManyRequests {
+			t.Fatalf("alias %q got through the lockout: %d", alias, response.Code)
+		}
+		loginID = loginIDPattern.FindStringSubmatch(response.Body.String())[1]
+	}
+	if method.calls != before {
+		t.Fatal("a locked-out alias still reached the directory")
+	}
+}
+
+// Many sign-in ids can be minted cheaply, so guesses can be sent in parallel.
+// The count must be taken before the slow directory answers, not after.
+func TestThrottleHoldsUnderParallelGuesses(t *testing.T) {
+	method, entry := credentialEntry()
+	method.delay = 60 * time.Millisecond
+	instance := loginTestServer(t, entry)
+	const guesses = 25
+	ids := make([]string, guesses)
+	for i := range ids {
+		ids[i] = loginPageID(t, instance)
+	}
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			serve(instance, postForm("/login/corp", url.Values{"login_id": {id}, "username": {"alice"}, "password": {"wrong"}}))
+		}(id)
+	}
+	wg.Wait()
+	if method.calls != loginMaxFailures {
+		t.Fatalf("%d parallel guesses reached the directory, want %d", method.calls, loginMaxFailures)
+	}
+}
+
+func TestSubjectPrefixesMustNotCollide(t *testing.T) {
+	methods := func(prefixes ...string) []LoginEntry {
+		var entries []LoginEntry
+		for index, prefix := range prefixes {
+			entries = append(entries, LoginEntry{Method: &fakeRedirectMethod{id: fmt.Sprintf("m%d", index)}, SubjectPrefix: prefix})
+		}
+		return entries
+	}
+	rejected := map[string][]string{
+		"same prefix":          {"a:", "a:"},
+		"two empty prefixes":   {"", ""},
+		"one begins another":   {"a-", "a-b-"},
+		"reversed":             {"a-b-", "a-"},
+		"duplicate among many": {"x:", "y:", "x:"},
+	}
+	for name, prefixes := range rejected {
+		if _, err := NewLoginRegistry(methods(prefixes...)...); err == nil {
+			t.Errorf("accepted: %s %q", name, prefixes)
+		}
+	}
+	for name, prefixes := range map[string][]string{
+		"distinct":                   {"google:", "github:", "corp:"},
+		"one empty to keep subjects": {"", "github:"},
+		"a single empty":             {""},
+	} {
+		if _, err := NewLoginRegistry(methods(prefixes...)...); err != nil {
+			t.Errorf("rejected %s: %v", name, err)
+		}
+	}
+}
+
+// The sign-in window is set once, when consent is approved. Choosing a
+// provider later does not start a fresh window.
+func TestProviderRedirectKeepsTheOriginalWindow(t *testing.T) {
+	_, credential := credentialEntry()
+	instance := loginTestServer(t, credential, LoginEntry{Method: &fakeRedirectMethod{id: "github"}, SubjectPrefix: "github:"})
+	clock := time.Now()
+	instance.now = func() time.Time { return clock }
+	loginID := loginIDFromRedirect(t, authorizeAndApprove(t, instance, defaultBrowser(instance)))
+	clock = clock.Add(9 * time.Minute)
+	started := serve(instance, postForm("/login/github", url.Values{"login_id": {loginID}}))
+	location, _ := url.Parse(started.Header().Get("Location"))
+	if location.Host != "idp.example" {
+		t.Fatalf("did not leave for the provider: %d", started.Code)
+	}
+	clock = clock.Add(2 * time.Minute) // 11 minutes after approval
+	late := serve(instance, httptest.NewRequest(http.MethodGet, "/identity/callback?code=good&state="+url.QueryEscape(location.Query().Get("state")), nil))
+	if late.Code != http.StatusBadRequest {
+		t.Fatalf("choosing a provider restarted the window: %d", late.Code)
+	}
+}
+
+// The record-kind namespace is one layer and the browser binding is another;
+// each is checked on its own, because either alone would hide the other's
+// removal from a test of the whole flow.
+func TestLoginRecordsLiveInTheirOwnNamespace(t *testing.T) {
+	_, entry := credentialEntry()
+	instance := loginTestServer(t, entry)
+	b := newBrowser()
+	loginID := loginIDFromRedirect(t, authorizeAndApprove(t, instance, b))
+	if loginRecordKey(loginID) == loginID {
+		t.Fatal("login record keys are not namespaced")
+	}
+	// A pending consent request is reachable only by its own id, never through
+	// the login key space, and a login record never through the raw id.
+	page := b.do(instance, httptest.NewRequest(http.MethodGet, "/authorize?response_type=code&client_id=client&redirect_uri=http%3A%2F%2Flocalhost%3A9999%2Fcallback&code_challenge=x&code_challenge_method=S256&resource=http%3A%2F%2Flocalhost%3A8081%2Fmcp", nil))
+	if match := consentIDPattern.FindStringSubmatch(page.Body.String()); match != nil {
+		if _, err := instance.Store.ConsumeConsentRequest(loginRecordKey(match[1]), time.Now()); err == nil {
+			t.Fatal("a consent request was reachable as a login record")
+		}
+	}
+	if _, err := instance.Store.ConsumeConsentRequest(loginID, time.Now()); err == nil {
+		t.Fatal("a login record was reachable by its raw id")
+	}
+	if _, err := instance.Store.ConsumeConsentRequest(loginRecordKey(loginID), time.Now()); err != nil {
+		t.Fatalf("the login record is not stored under its namespaced key: %v", err)
+	}
+}
+
+func TestBindingNeverMatchesWhenEitherSideIsEmpty(t *testing.T) {
+	stored := ConsentRequest{Request: AuthorizationRequest{LoginBinding: HashSecret("value")}}
+	if !bindingMatches("value", stored) {
+		t.Fatal("the genuine value was refused")
+	}
+	for name, tc := range map[string]struct {
+		presented string
+		pending   ConsentRequest
+	}{
+		"wrong value":              {"other", stored},
+		"no cookie":                {"", stored},
+		"no stored binding":        {"value", ConsentRequest{}},
+		"neither side has a value": {"", ConsentRequest{}},
+		"the stored hash itself":   {HashSecret("value"), stored},
+	} {
+		if bindingMatches(tc.presented, tc.pending) {
+			t.Errorf("%s: matched", name)
+		}
+	}
 }
