@@ -70,6 +70,31 @@ Import `github.com/Agent-Hellboy/mcp-auth/auth-client/go/mcpauth`, configure `JW
 
 `auth-client/go/go.mod` declares `go 1.18`. That is the language floor of the client: the source uses the predeclared `any` alias and otherwise only long-stable standard-library APIs, and it has no third-party dependencies. The authorization server stays on Go 1.26, which is the oldest Go release this repository supports for the server. CI runs the client and server unit tests, including `govulncheck`, on Go 1.26 and 1.27. End-to-end and image builds stay on 1.26.
 
+### Session binding and session-bound cache (Go only)
+
+Two Go helpers support gateways that proxy to an upstream MCP server on behalf of a verified user. Python and TypeScript parity is not included in this change.
+
+`SessionBinder` wraps an upstream MCP session id as `<id>.<tag>`, where the tag is an HMAC-SHA256 over the issuer, subject, service and upstream id. `Unwrap` accepts the id only for the same issuer, subject and service, compares the tag in constant time, and is stateless across replicas that share the key. `NewSessionBinder` rejects an empty key. Tag inputs are length-prefixed, so field boundaries cannot be shifted to forge a match.
+
+`SessionBoundCache[V]` is a bounded LRU keyed by `SessionKey{Issuer, Subject, Service, Version}`. Each entry expires at the login session expiry you pass to `Put`, or after `maxTTL` if sooner, and an expired entry is never returned. Consult it only after the request is authorised, and do not log cached values.
+
+```go
+binder, err := mcpauth.NewSessionBinder(secretKey) // shared by all replicas
+if err != nil {
+	return err
+}
+clientID := binder.Wrap(iss, sub, "gitlab", upstreamID) // "" if unusable
+upstreamID, ok := binder.Unwrap(iss, sub, "gitlab", presentedID)
+
+cache := mcpauth.NewSessionBoundCache[map[string]string](1024, 5*time.Minute)
+key := mcpauth.SessionKey{Issuer: iss, Subject: sub, Service: "gitlab", Version: mappingVersion}
+if v, ok := cache.Get(key, time.Now()); ok {
+	_ = v
+} else {
+	cache.Put(key, resolved, sessionExpiry)
+}
+```
+
 ## TypeScript
 
 The TypeScript SDK supports Node.js 22 or newer and has no runtime dependencies.
