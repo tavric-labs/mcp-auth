@@ -63,7 +63,7 @@ type loginLDAPEntry struct {
 	StartTLS         bool              `json:"start_tls"`
 	CAFile           string            `json:"ca_file"`
 	BindDN           string            `json:"bind_dn"`
-	BindPasswordEnv  string            `json:"bind_password_env"`
+	BindSecretEnv    string            `json:"bind_password_env"`
 	UserSearchBase   string            `json:"user_search_base"`
 	UserFilter       string            `json:"user_filter"`
 	UserDNTemplate   string            `json:"user_dn_template"`
@@ -168,7 +168,7 @@ func ParseLoginMethods(data []byte, options LoginMethodsOptions) (*LoginRegistry
 				return NewLDAPLoginMethod(LDAPConfig{
 					ID: common.ID, Label: defaultLabel(label, "Sign in with your directory account"),
 					URL: entry.URL, StartTLS: entry.StartTLS, CAFile: entry.CAFile,
-					BindDN: entry.BindDN, BindPasswordEnv: entry.BindPasswordEnv,
+					BindDN: entry.BindDN, BindSecretEnv: entry.BindSecretEnv,
 					UserSearchBase: entry.UserSearchBase, UserFilter: entry.UserFilter,
 					UserDNTemplate: entry.UserDNTemplate, SubjectAttribute: entry.SubjectAttribute,
 					Claims: entry.Claims, UsernameLabel: entry.UsernameLabel, PasswordLabel: entry.PasswordLabel,

@@ -63,7 +63,7 @@ func aliceEntry() *ldap.Entry {
 func searchConfig() LDAPConfig {
 	return LDAPConfig{
 		ID: "corp", Label: "Corp", URL: "ldaps://ldap.example.com",
-		BindDN: "cn=svc,dc=example,dc=com", BindPasswordEnv: "TEST_LDAP_BIND_PASSWORD",
+		BindDN: "cn=svc,dc=example,dc=com", BindSecretEnv: "TEST_LDAP_BIND_PASSWORD",
 		UserSearchBase: "ou=people,dc=example,dc=com", UserFilter: "(&(objectClass=person)(uid={username}))",
 		SubjectAttribute: "entryUUID", Claims: map[string]string{"email": "mail", "name": "cn"},
 	}
@@ -369,7 +369,7 @@ func TestLDAPConfigValidation(t *testing.T) {
 		"both modes":                  mutate(func(c *LDAPConfig) { c.UserDNTemplate = "uid={username},dc=x" }),
 		"neither mode":                mutate(func(c *LDAPConfig) { *c = LDAPConfig{ID: "corp", URL: c.URL, SubjectAttribute: "dn"} }),
 		"search without bind dn":      mutate(func(c *LDAPConfig) { c.BindDN = "" }),
-		"search without secret":       mutate(func(c *LDAPConfig) { c.BindPasswordEnv = "" }),
+		"search without secret":       mutate(func(c *LDAPConfig) { c.BindSecretEnv = "" }),
 		"filter without placeholder":  mutate(func(c *LDAPConfig) { c.UserFilter = "(uid=alice)" }),
 		"filter with two":             mutate(func(c *LDAPConfig) { c.UserFilter = "(|(uid={username})(mail={username}))" }),
 		"no subject attribute":        mutate(func(c *LDAPConfig) { c.SubjectAttribute = " " }),

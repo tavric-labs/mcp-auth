@@ -214,9 +214,16 @@ accounts are not linked.
   so `alice`, `Alice ` and a fullwidth spelling share one count. Aliases a
   directory defines itself, such as `DOMAIN\alice` and `alice@domain`, cannot
   be unified, so they get separate counts. The count is in memory and per
-  replica. Up to 50,000 accounts are tracked; a locked account is never dropped
-  to make room, and if every tracked account is locked a new account is refused
-  until one expires. It does not key on client address, because behind a proxy
+  replica. Up to 50,000 accounts are tracked. A locked account is never dropped
+  to make room. When the table is full, an account with fewer than five
+  failures is dropped instead (oldest first), which only resets its count, so
+  filling the table costs about 50,000 requests to give back a handful of
+  guesses on one account. If every tracked account is locked, a new account is
+  refused until one expires. That needs roughly 250,000 failed attempts within
+  five minutes, each a directory round trip, and it is a deliberate choice:
+  letting new accounts in untracked would let anyone who fills the table guess
+  without limit, which is worse than a temporary refusal. Rate limiting at your
+  proxy is what keeps either from being practical. It does not key on client address, because behind a proxy
   everyone shares one. Add rate limiting at your proxy for volume attacks. A
   lockout can also be used to lock a known account out for a few minutes.
   Unknown accounts return slightly faster than known ones, which is a timing

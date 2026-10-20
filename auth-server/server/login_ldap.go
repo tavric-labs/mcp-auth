@@ -51,10 +51,10 @@ type LDAPConfig struct {
 	CAFile string
 
 	// Search mode.
-	BindDN          string
-	BindPasswordEnv string
-	UserSearchBase  string
-	UserFilter      string
+	BindDN         string
+	BindSecretEnv  string
+	UserSearchBase string
+	UserFilter     string
 
 	// Direct-bind mode.
 	UserDNTemplate string
@@ -99,10 +99,10 @@ func NewLDAPLoginMethod(config LDAPConfig, allowInsecure bool) (*LDAPLoginMethod
 		return nil, fmt.Errorf("ldap login method %q: %w", config.ID, err)
 	}
 	method := &LDAPLoginMethod{config: config, slots: make(chan struct{}, ldapMaxConcurrent)}
-	if config.BindPasswordEnv != "" {
-		method.bindPassword = os.Getenv(config.BindPasswordEnv)
+	if config.BindSecretEnv != "" {
+		method.bindPassword = os.Getenv(config.BindSecretEnv)
 		if method.bindPassword == "" {
-			return nil, fmt.Errorf("ldap login method %q: environment variable %s is empty", config.ID, config.BindPasswordEnv)
+			return nil, fmt.Errorf("ldap login method %q: environment variable %s is empty", config.ID, config.BindSecretEnv)
 		}
 	}
 	tlsConfig, err := config.tlsConfig()
@@ -130,7 +130,7 @@ func (c LDAPConfig) validate(allowInsecure bool) error {
 	if parsed.Scheme == "ldaps" && c.StartTLS {
 		return errors.New("start_tls applies to ldap:// URLs, not ldaps://")
 	}
-	search := c.UserSearchBase != "" || c.UserFilter != "" || c.BindDN != "" || c.BindPasswordEnv != ""
+	search := c.UserSearchBase != "" || c.UserFilter != "" || c.BindDN != "" || c.BindSecretEnv != ""
 	direct := c.UserDNTemplate != ""
 	switch {
 	case search && direct:
@@ -139,7 +139,7 @@ func (c LDAPConfig) validate(allowInsecure bool) error {
 		return errors.New("configure a search (user_search_base, user_filter, bind_dn, bind_password_env) or user_dn_template")
 	}
 	if search {
-		if c.UserSearchBase == "" || c.UserFilter == "" || c.BindDN == "" || c.BindPasswordEnv == "" {
+		if c.UserSearchBase == "" || c.UserFilter == "" || c.BindDN == "" || c.BindSecretEnv == "" {
 			return errors.New("search mode requires user_search_base, user_filter, bind_dn and bind_password_env")
 		}
 		if strings.Count(c.UserFilter, ldapUsernamePlaceholder) != 1 {
