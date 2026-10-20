@@ -90,6 +90,7 @@ Local-development only — no TLS, no identity provider. See
 | I want to… | Read |
 | --- | --- |
 | Deploy the authorization server | [Authorization server](docs/auth-server.md) |
+| Offer Google, GitHub, LDAP and OIDC sign-in together | [Login methods](docs/login-methods.md) |
 | Protect an MCP resource server | [Auth client SDKs](docs/auth-client.md) |
 | Understand the protocol flow | [Architecture](docs/architecture.md) |
 | Know what is guaranteed, and what I own | [Security model](docs/security-model.md) |

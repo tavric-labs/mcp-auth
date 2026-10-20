@@ -108,6 +108,10 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("GET "+callbackPath, s.identityCallback)
 	}
 	mux.HandleFunc("POST /authorize/consent", s.consent)
+	// The login page and its per-method forms exist only when a login registry
+	// is configured; both answer 404 otherwise.
+	mux.HandleFunc("GET /login", s.loginPage)
+	mux.HandleFunc("POST /login/{method}", s.loginSubmit)
 	mux.HandleFunc("POST /token", s.token)
 	mux.HandleFunc("POST /register", s.register)
 	mux.HandleFunc("POST /revoke", s.revoke)
@@ -296,6 +300,10 @@ func (s *Server) finishConsent(w http.ResponseWriter, r *http.Request, consentID
 		redirectError(w, r, request, "access_denied", "consent was denied", s.Config.Issuer, s.Config.AuthorizationResponseIssuer)
 		return
 	}
+	if registry := s.loginRegistry(); registry != nil {
+		s.startLogin(w, r, registry, pending)
+		return
+	}
 	if interactive, ok := s.IdentityProvider.(InteractiveIdentityProvider); ok {
 		upstreamState := randomID()
 		location, codeVerifier, err := interactive.Begin(r.Context(), IdentityRequest{
@@ -324,6 +332,10 @@ func (s *Server) finishConsent(w http.ResponseWriter, r *http.Request, consentID
 }
 
 func (s *Server) identityCallback(w http.ResponseWriter, r *http.Request) {
+	if registry := s.loginRegistry(); registry != nil {
+		s.registryCallback(w, r, registry)
+		return
+	}
 	interactive, ok := s.IdentityProvider.(InteractiveIdentityProvider)
 	if !ok {
 		http.NotFound(w, r)

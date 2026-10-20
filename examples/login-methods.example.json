@@ -1,0 +1,35 @@
+{
+  "methods": [
+    {
+      "id": "google",
+      "type": "google",
+      "client_id_env": "MCP_AUTH_GOOGLE_CLIENT_ID",
+      "client_secret_env": "MCP_AUTH_GOOGLE_CLIENT_SECRET",
+      "allowed_domains": ["example.com"]
+    },
+    {
+      "id": "github",
+      "type": "github",
+      "client_id_env": "MCP_AUTH_GITHUB_CLIENT_ID",
+      "client_secret_env": "MCP_AUTH_GITHUB_CLIENT_SECRET",
+      "allowed_orgs": ["acme"]
+    },
+    {
+      "id": "corp",
+      "type": "ldap",
+      "label": "Company directory",
+      "url": "ldaps://ldap.example.com",
+      "bind_dn": "cn=mcp-auth,ou=services,dc=example,dc=com",
+      "bind_password_env": "MCP_AUTH_LDAP_BIND_PASSWORD",
+      "user_search_base": "ou=people,dc=example,dc=com",
+      "user_filter": "(&(objectClass=person)(uid={username}))",
+      "subject_attribute": "entryUUID",
+      "claims": {"email": "mail", "name": "cn"}
+    },
+    {
+      "id": "okta",
+      "type": "oidc",
+      "connector": "okta"
+    }
+  ]
+}
