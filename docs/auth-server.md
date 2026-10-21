@@ -2,7 +2,9 @@
 
 The Go authorization server presents standard OAuth endpoints to MCP clients and
 adapts a selected upstream OIDC or OAuth 2.0 provider at runtime. One process is
-bound to one connector and can serve several MCP resource audiences.
+bound to one connector and can serve several MCP resource audiences. To offer
+several sign-in methods from one process (Google, GitHub, LDAP, OIDC), see
+[Login methods](login-methods.md).
 
 The **MCP-facing flow is OAuth 2.1**. “OAuth 2.0 provider” below describes an
 upstream identity provider that does not offer OIDC; it does not change the
@@ -150,6 +152,10 @@ Important settings:
 - `MCP_AUTH_STORE`: `memory` for tests/local development or `sqlite` for durable single-node deployments.
 - `MCP_AUTH_DATABASE_URL`: SQLite path when `MCP_AUTH_STORE=sqlite`.
 - `MCP_AUTH_CONNECTORS_FILE`: JSON file containing named upstream connectors.
+- `MCP_AUTH_LOGIN_METHODS_FILE`: JSON file that enables [login methods](login-methods.md): Google, GitHub,
+  LDAP and OIDC connectors offered together on one login page. It replaces `MCP_AUTH_CONNECTOR`; setting
+  both is a startup error.
+- `MCP_AUTH_LOGIN_TTL`: how long a person has to finish signing in with login methods (default `10m`).
 - `MCP_AUTH_CONNECTOR`: selected connector name. One running process serves exactly one connector and can
   serve several resources with `MCP_AUTH_RESOURCES` — see [Serving multiple resources](#serving-multiple-resources).
   Any other connector in the file is inert, and is named in a startup warning so it can't be

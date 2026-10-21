@@ -43,6 +43,10 @@ type AuthorizationRequest struct {
 	Resource      string   `json:"resource"`
 	ResponseType  string   `json:"response_type"`
 	Nonce         string   `json:"nonce"`
+	// LoginBinding is the hash of a random value held in the browser that
+	// approved consent. Login-methods mode requires the browser to present it
+	// again to sign in (see login_flow.go). It is never read from a request.
+	LoginBinding string `json:"login_binding,omitempty"`
 }
 
 func NewServer(config Config, store Store, identityProvider IdentityProvider, exchanger TokenExchanger, auditWriter io.Writer) (*Server, error) {
@@ -108,6 +112,10 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("GET "+callbackPath, s.identityCallback)
 	}
 	mux.HandleFunc("POST /authorize/consent", s.consent)
+	// The login page and its per-method forms exist only when a login registry
+	// is configured; both answer 404 otherwise.
+	mux.HandleFunc("GET /login", s.loginPage)
+	mux.HandleFunc("POST /login/{method}", s.loginSubmit)
 	mux.HandleFunc("POST /token", s.token)
 	mux.HandleFunc("POST /register", s.register)
 	mux.HandleFunc("POST /revoke", s.revoke)
@@ -296,6 +304,10 @@ func (s *Server) finishConsent(w http.ResponseWriter, r *http.Request, consentID
 		redirectError(w, r, request, "access_denied", "consent was denied", s.Config.Issuer, s.Config.AuthorizationResponseIssuer)
 		return
 	}
+	if registry := s.loginRegistry(); registry != nil {
+		s.startLogin(w, r, registry, pending)
+		return
+	}
 	if interactive, ok := s.IdentityProvider.(InteractiveIdentityProvider); ok {
 		upstreamState := randomID()
 		location, codeVerifier, err := interactive.Begin(r.Context(), IdentityRequest{
@@ -324,6 +336,10 @@ func (s *Server) finishConsent(w http.ResponseWriter, r *http.Request, consentID
 }
 
 func (s *Server) identityCallback(w http.ResponseWriter, r *http.Request) {
+	if registry := s.loginRegistry(); registry != nil {
+		s.registryCallback(w, r, registry)
+		return
+	}
 	interactive, ok := s.IdentityProvider.(InteractiveIdentityProvider)
 	if !ok {
 		http.NotFound(w, r)

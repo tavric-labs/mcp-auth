@@ -71,7 +71,7 @@ func main() {
 	if config.LocalDevelopment && config.PrivateKeyFile == "" {
 		slog.Warn("INSECURE LOCAL DEVELOPMENT: using an ephemeral signing key; all tokens become invalid after restart")
 	}
-	localIdentity := config.LocalDevelopment && config.ConnectorName == ""
+	localIdentity := config.LocalDevelopment && config.ConnectorName == "" && config.LoginMethodsFile == ""
 	localExchange := config.LocalDevelopment && config.LocalTokenExchange
 	if localIdentity || localExchange {
 		slog.Warn("INSECURE LOCAL DEVELOPMENT is active", "fixed_subject_identity", localIdentity, "subject", config.LocalSubject, "local_token_exchange", localExchange)
@@ -161,6 +161,20 @@ func connectorNamesExcept(connectors map[string]server.ConnectorConfig, selected
 }
 
 func buildProviders(config server.Config, store server.Store) (server.Config, server.IdentityProvider, server.TokenExchanger, error) {
+	if config.LoginMethodsFile != "" {
+		// Registry mode: several login methods on one login page. There is no
+		// single connector, so no downstream upstream-session exchanger either;
+		// external credential connectors are configured separately.
+		registry, err := server.LoadLoginMethods(config.LoginMethodsFile, server.LoginMethodsOptions{
+			CallbackURL:    config.IdentityCallbackURL(),
+			ConnectorsFile: config.ConnectorsFile,
+			AllowInsecure:  config.LocalDevelopment || config.AllowInsecureConnectors,
+		})
+		if err != nil {
+			return config, nil, nil, err
+		}
+		return config, registry, nil, nil
+	}
 	if config.ConnectorName == "" {
 		if !config.LocalDevelopment {
 			return config, nil, nil, errors.New("a named connector is required outside local development")

@@ -55,9 +55,17 @@ type Config struct {
 	AllowInsecureConnectors bool
 	ConnectorsFile          string
 	ConnectorName           string
-	StoreBackend            string
-	DatabaseURL             string
-	ResourceClientsFile     string
+	// LoginMethodsFile enables the pluggable login registry (see login.go):
+	// several sign-in methods offered on one login page. It replaces
+	// MCP_AUTH_CONNECTOR, and the two cannot both be set.
+	LoginMethodsFile string
+	// LoginTTL bounds how long a person has to finish signing in, from the
+	// login page or the upstream provider back to this server. It is longer
+	// than AuthorizationCodeTTL because it covers typing a password.
+	LoginTTL            time.Duration
+	StoreBackend        string
+	DatabaseURL         string
+	ResourceClientsFile string
 	// ExternalCredentialsFile registers provider-neutral external credential
 	// connectors (see external_credentials.go).
 	ExternalCredentialsFile string
@@ -146,10 +154,15 @@ func (c *Config) Validate() error {
 	if storeBackend == "sqlite" && c.DatabaseURL == "" {
 		return errors.New("MCP_AUTH_DATABASE_URL is required for the sqlite store")
 	}
+	if c.LoginMethodsFile != "" && c.ConnectorName != "" {
+		return errors.New("MCP_AUTH_LOGIN_METHODS_FILE and MCP_AUTH_CONNECTOR cannot both be set; list the connector as an oidc login method instead")
+	}
 	if c.ConnectorName != "" && c.ConnectorsFile == "" {
 		return errors.New("MCP_AUTH_CONNECTORS_FILE is required when MCP_AUTH_CONNECTOR is set")
 	}
-	if c.ConnectorsFile != "" && c.ConnectorName == "" {
+	// A login methods file may reference connectors by name, so the connectors
+	// file is legitimate there without a single selected connector.
+	if c.ConnectorsFile != "" && c.ConnectorName == "" && c.LoginMethodsFile == "" {
 		return errors.New("MCP_AUTH_CONNECTOR is required when MCP_AUTH_CONNECTORS_FILE is set")
 	}
 	if c.ResourceScopesJSON != "" {
@@ -278,6 +291,21 @@ func (c Config) IdentityCallbackPath() string {
 // deployment and posts to a 404.
 func (c Config) ConsentEndpoint() string { return c.issuerBase() + "/authorize/consent" }
 
+// LoginEndpoint is the login page, and the base of each method's form action
+// (LoginEndpoint + "/" + method id). It derives from the issuer for the same
+// reason ConsentEndpoint does.
+func (c Config) LoginEndpoint() string { return c.issuerBase() + "/login" }
+
+// defaultLoginTTL applies when Config.LoginTTL is unset.
+const defaultLoginTTL = 10 * time.Minute
+
+func (c Config) loginTTL() time.Duration {
+	if c.LoginTTL <= 0 {
+		return defaultLoginTTL
+	}
+	return c.LoginTTL
+}
+
 func ConfigFromEnv() Config {
 	return Config{
 		Issuer:                      env("MCP_AUTH_ISSUER", "http://localhost:8080"),
@@ -304,6 +332,8 @@ func ConfigFromEnv() Config {
 		AllowInsecureConnectors:     boolEnv("MCP_AUTH_ALLOW_INSECURE_CONNECTORS", false),
 		ConnectorsFile:              os.Getenv("MCP_AUTH_CONNECTORS_FILE"),
 		ConnectorName:               os.Getenv("MCP_AUTH_CONNECTOR"),
+		LoginMethodsFile:            os.Getenv("MCP_AUTH_LOGIN_METHODS_FILE"),
+		LoginTTL:                    durationEnv("MCP_AUTH_LOGIN_TTL", defaultLoginTTL),
 		StoreBackend:                env("MCP_AUTH_STORE", "memory"),
 		DatabaseURL:                 os.Getenv("MCP_AUTH_DATABASE_URL"),
 		ResourceClientsFile:         os.Getenv("MCP_AUTH_RESOURCE_CLIENTS_FILE"),
