@@ -54,9 +54,11 @@ auth = build_remote_auth(
 )
 mcp = FastMCP("protected-tools", auth=auth)
 
+
 @mcp.tool
 def ping() -> str:
     return "pong"
+
 
 if __name__ == "__main__":
     mcp.run(transport="streamable-http", host="127.0.0.1", port=8081, path="/mcp")
