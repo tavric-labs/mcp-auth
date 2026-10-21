@@ -2,7 +2,8 @@
 
 mcp-auth is a provider-neutral authorization server and resource-server SDKs
 maintained by [Tavric Labs](https://github.com/tavric-labs). Start with the path
-that matches your role.
+that matches your role. The [use-case guide](use-cases.md) maps supported flows
+to configuration, runnable examples and verification coverage.
 
 ## Deploy the authorization server
 
@@ -11,7 +12,8 @@ then [Authorization server](auth-server.md) for configuration, identity-provider
 connectors and the production checklist. Use [Login methods](login-methods.md)
 when offering multiple sign-in options.
 
-You need an upstream identity provider and a public HTTPS issuer for production.
+Production needs a configured upstream identity source (one OIDC/OAuth connector
+or the login-method registry, including LDAP) and a public HTTPS issuer.
 The local-development quickstart in the [repository README](../README.md#try-it)
 is for trying the server on your machine.
 

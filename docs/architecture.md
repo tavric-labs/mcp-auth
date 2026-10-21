@@ -15,7 +15,7 @@ security boundary, not just an implementation detail:
 | --- | --- | --- |
 | Authorization server | Issues MCP access tokens, publishes metadata, handles consent, client registration/Client ID Metadata Documents, and token lifecycle | User directory, MFA, and enterprise sign-in policy |
 | Resource server | The SDKs publish RFC 9728 metadata, emit bearer challenges, and verify tokens; the application applies per-tool authorization | Issuing MCP tokens or accepting a token for a different audience |
-| Upstream identity provider | Connected through OIDC or OAuth 2.0 to authenticate the user and, where configured, obtain a downstream credential | Being exposed directly to MCP clients |
+| Upstream identity provider | Connected through OIDC/OAuth or a configured login method (including LDAP) to authenticate the user; single-connector mode can retain a downstream credential | Being exposed directly to MCP clients |
 
 The supported MCP authorization profile is OAuth 2.1 Authorization Code with
 mandatory PKCE `S256`, RFC 8414 Authorization Server Metadata, RFC 9728
@@ -36,28 +36,6 @@ authorization server and provide discovery, challenge, and token-exchange
 helpers. They do not require the bundled authorization server.
 
 Provider integrations implement `IdentityProvider` or `TokenExchanger` interfaces. Provider-specific claims, SDKs, and policy remain outside the core server and SDKs.
-
-## Standards and roles
-
-mcp-auth supports the MCP OAuth 2.1 profile, including RFC 8414 Authorization
-Server Metadata, RFC 9728 Protected Resource Metadata, mandatory PKCE S256,
-resource indicators and audience-bound tokens, refresh-token rotation, RFC
-9207 authorization-response `iss`, and Client ID Metadata Documents (CIMD).
-CIMD is the preferred client-registration mechanism when advertised by the
-authorization server; Dynamic Client Registration (DCR) remains available as a
-backwards-compatibility fallback for servers that do not advertise CIMD. The
-client chooses one mechanism according to server metadata; it does not perform
-DCR after a successful CIMD registration because CIMD has no registration
-endpoint. This is a defined profile, not a claim to implement every OAuth
-extension or every
-responsibility in the MCP specification. Clients, resource servers, and
-authorization servers have distinct normative responsibilities.
-
-| Role | Responsibilities |
-| --- | --- |
-| Authorization server (`auth-server`) | Publishes authorization-server metadata; handles client registration, authorization, consent, codes and tokens; requires PKCE S256; binds tokens to the requested resource; rotates refresh tokens; brokers user authentication through the selected upstream provider. |
-| Resource-server SDK | Publishes or helps publish Protected Resource Metadata and challenges; validates issuer, signature, audience/resource, expiry, subject, and required scopes; provides token-exchange helpers. The resource server defines its own access policy. |
-| Upstream identity provider | Authenticates users and owns MFA, directory and access policy, user lifecycle, and upstream credentials. mcp-auth is not an identity provider. |
 
 ```mermaid
 flowchart TB
@@ -96,6 +74,8 @@ flowchart TB
 
 ## MCP request flow
 
+This example uses a single connector with a redirect-based provider login.
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -110,11 +90,14 @@ sequenceDiagram
     RS-->>Client: authorization_servers + resource
     Client->>AS: GET authorization-server metadata
     AS-->>Client: authorize, token, register, JWKS endpoints
-    opt Dynamic client registration enabled
+    opt Client uses DCR and registration is enabled
         Client->>AS: POST /register
         AS-->>Client: client_id
     end
     Client->>AS: GET /authorize + resource + PKCE challenge
+    AS->>AS: Resolve registered client or HTTPS client metadata
+    AS-->>Client: Consent page with resource and scopes
+    Client->>AS: Approve consent
     AS->>IdP: Redirect user to upstream authorization
     IdP-->>AS: Authorization callback
     AS-->>Client: Authorization code + optional RFC 9207 iss
@@ -141,7 +124,7 @@ There are three different credentials:
 | --- | --- | --- |
 | MCP client token | The MCP resource server | Inbound resource-server authorization |
 | Resource-server service credential | A downstream authorization server/API | Server-to-server authentication |
-| Downstream API token | The downstream API audience | Requests to that downstream API only |
+| Downstream API token | The provider service and permissions actually granted by that provider | Requests to that downstream API only |
 
 The resource server must never forward the MCP client token to an API with a different audience. Use RFC 8693 token exchange or another provider adapter to mint a separate downstream token. Under the default `upstream_session` strategy the exchange response includes `issued_token_type`, and `audience`, `scope`, and `requested_token_type` are advisory: the credential is the one captured at login, not a newly minted audience-scoped token.
 
@@ -149,7 +132,7 @@ The resource server must never forward the MCP client token to an API with a dif
 flowchart LR
     mcpToken["MCP access token<br/>aud = MCP resource"]
     serviceCredential["Resource-server credential<br/>private_key_jwt"]
-    downstreamToken["Downstream token<br/>aud = downstream API"]
+    downstreamToken["Downstream credential<br/>provider-granted audience and scopes"]
 
     client["MCP client"] -->|"Bearer"| mcpToken
     mcpToken -->|"validated by"| resource["MCP resource server"]
@@ -177,18 +160,33 @@ exchange and never handles the credential. See
 ## Extensibility
 
 - `Store` allows durable persistence without changing handlers. OAuth state belongs in a shared managed store for multi-instance deployments.
-- `KeyProvider` allows KMS/HSM or secret-manager-backed signing and JWKS publication; local PEM/ephemeral keys are for development only.
-- `IdentityProvider` allows local development, OIDC, SAML-backed login, or another user system.
+- `KeyProvider` allows KMS/HSM or secret-manager-backed signing and JWKS publication; the shipped binary loads a PEM key; KMS/HSM adapters require application integration.
+- `IdentityProvider` is the application integration interface. The shipped binary supports a selected OIDC/OAuth connector or the Google, GitHub, LDAP and OIDC login-method registry; there is no built-in SAML connector.
 - `TokenExchanger` allows RFC 8693 or provider-specific downstream exchange.
 - SDK discovery objects accept third-party authorization-server metadata.
 - FastMCP is optional in the Python package; non-FastMCP servers can use the verifier and challenge helpers directly.
 
 ## Deployment topology
 
-One `auth-server` process has one issuer, one selected connector, and one canonical
-resource audience. Deploy multiple processes when protecting multiple resources.
-That keeps client registrations, consent state, signing keys, and upstream sessions
-from accidentally crossing resource boundaries.
+One process has one issuer and can serve several canonical resource URLs in
+`MCP_AUTH_RESOURCES`. Each access token is bound to the requested resource;
+`MCP_AUTH_RESOURCE_SCOPES` defines that resource's scope allowlist. Separate
+processes are optional when resources need separate issuers, signing keys or
+operational ownership.
+
+Choose one login mode per process:
+
+- `MCP_AUTH_CONNECTOR`: one upstream OIDC/OAuth connector, including its
+  `upstream_session` or `rfc8693` downstream-token strategy.
+- `MCP_AUTH_LOGIN_METHODS_FILE`: several login options under one issuer. It
+  establishes identity only; downstream access uses external credential
+  assertions and resource-side credential resolution.
+
+The following topology is an example of **separate issuer boundaries**, not a
+requirement for every additional MCP resource. The shipped binary listens over
+HTTP; production HTTPS terminates at a restricted trusted reverse proxy with
+`MCP_AUTH_TRUST_PROXY_TLS=true`. Library consumers can serve `Handler()` using
+their own TLS listener. See [use cases](use-cases.md) for the mode choices.
 
 ```mermaid
 flowchart TB

@@ -1,8 +1,8 @@
 # Authorization server
 
 The Go authorization server presents standard OAuth endpoints to MCP clients and
-adapts a selected upstream OIDC or OAuth 2.0 provider at runtime. One process is
-bound to one connector and can serve several MCP resource audiences. To offer
+adapts upstream identity at runtime. In single-connector mode, one process
+selects one OIDC/OAuth provider and can serve several MCP resource audiences. To offer
 several sign-in methods from one process (Google, GitHub, LDAP, OIDC), see
 [Login methods](login-methods.md).
 
@@ -103,9 +103,21 @@ flowchart LR
 
 ## Run and configure
 
+From the repository root, start a local test instance:
+
 ```bash
-go run ./auth-server/cmd/auth-server
+(
+  cd auth-server
+  MCP_AUTH_LOCAL_DEVELOPMENT=true \
+  MCP_AUTH_REQUIRE_HTTPS=false \
+  MCP_AUTH_REGISTRATION_ENABLED=true \
+  GOWORK=off go run ./cmd/auth-server
+)
 ```
+
+This signs in as a fixed local subject, without a real identity provider. Use
+[it with a resource-server example](use-cases.md#try-a-local-authorization-flow)
+for the full OAuth flow.
 
 Release tags are also published to Docker Hub as
 [`princekrroshan01/mcp-auth-server`](https://hub.docker.com/r/princekrroshan01/mcp-auth-server),
@@ -116,6 +128,7 @@ docker run --rm -p 8080:8080 \
   -e MCP_AUTH_ISSUER=http://localhost:8080 \
   -e MCP_AUTH_RESOURCES=http://localhost:8081/mcp \
   -e MCP_AUTH_LOCAL_DEVELOPMENT=true \
+  -e MCP_AUTH_REGISTRATION_ENABLED=true \
   -e MCP_AUTH_REQUIRE_HTTPS=false \
   princekrroshan01/mcp-auth-server:0.6.0
 ```
@@ -127,7 +140,12 @@ mounts a persistent signing key and durable store, and configures a connector.
 in production. Never bake client secrets, signing keys, or administrator
 credentials into an image or a public Dockerfile.
 
-Copy `.env.example` to a local, untracked `.env` only if useful. The server reads `MCP_AUTH_*` variables; production should inject them through the deployment environment or a secret manager.
+The server reads environment variables; it does not load `.env` automatically.
+For local fixed-subject testing, copy `.env.example` to an untracked `.env` and
+export it in your shell with `set -a; . ./.env; set +a` before running the server.
+The sample enables local mode, disables HTTPS, allows DCR and uses memory state.
+Production should supply its own environment with local mode off, HTTPS required,
+a real identity source, persistent signing key and durable store.
 
 Important settings:
 
@@ -160,16 +178,16 @@ Important settings:
   serve several resources with `MCP_AUTH_RESOURCES` — see [Serving multiple resources](#serving-multiple-resources).
   Any other connector in the file is inert, and is named in a startup warning so it can't be
   mistaken for live. Local identity/token exchange is available only when `MCP_AUTH_LOCAL_DEVELOPMENT=true`;
-  production starts only with a named connector. While the fixed-subject identity provider or the local
+  production requires a named connector or a configured login-method registry. While the fixed-subject identity provider or the local
   token exchanger is in use, the process logs a warning at startup, again every minute, and on every
   use. The loopback-issuer and memory-store guards still refuse to boot a non-loopback issuer or a
   production memory store.
-- `MCP_AUTH_REGISTRATION_ENABLED`: disable open registration unless policy permits it. Defaults to
-  `false`, but Cursor and Claude both perform dynamic client registration (`POST /register`) before
-  their first connection, with no fallback to a pre-registered client. A real deployment serving
-  either of them must set this to `true`, or the first connection attempt fails with no obvious
-  cause pointing back to this setting. Combine it with `AllowedClientRedirectURIs` (below) rather
-  than leaving registration fully open if the deployment can enumerate its expected clients.
+- `MCP_AUTH_REGISTRATION_ENABLED`: defaults to `false`. Enable it for clients
+  that rely on Dynamic Client Registration. Clients using advertised CIMD do
+  not need `/register`. Check the actual client's registration mechanism;
+  do not assume all desktop clients follow the same flow. In single-connector
+  mode, `allowed_client_redirect_uris` can restrict accepted redirects. The
+  login-method registry does not currently apply that connector allowlist.
 - `MCP_AUTH_IDENTITY_CALLBACK_URL`: the redirect URI registered with the identity provider. Empty
   derives it as `<MCP_AUTH_ISSUER>/identity/callback`. Set it to reuse a URI the provider already
   accepts; the callback is then served at that path too, so your ingress has to route it here. See
@@ -205,7 +223,13 @@ Important settings:
   resource server bound to one of them obtains a short-lived credential-access assertion through the
   token-exchange grant instead of an upstream token. See [External credential connectors](external-credentials.md).
 
-The Dockerfile builds a static, non-root image. Put TLS termination in a trusted reverse proxy or serve the endpoints through an HTTPS gateway.
+The Dockerfile builds a static, non-root image. The shipped CLI uses
+`http.ListenAndServe`; it has no certificate/key flags for an HTTPS listener.
+`MCP_AUTH_REQUIRE_HTTPS` validates issuer/resource URLs and guards requests; it
+does not turn that listener into TLS. In production, put it behind an HTTPS
+reverse proxy, set `MCP_AUTH_TRUST_PROXY_TLS=true`, have the proxy overwrite
+`X-Forwarded-Proto`, and restrict access so only that proxy can reach the
+listener. Code embedding `Server.Handler()` may provide its own TLS listener.
 
 ## The redirect URI you register with your identity provider
 
@@ -363,9 +387,12 @@ allowlist). `token_endpoint_auth_method` must be `none` or omitted. The same
 
 The fetch is HTTPS only, does not follow redirects, times out after 5 seconds,
 and reads at most 1 MiB. URLs with userinfo or a fragment are rejected, as are
-non-loopback IP literals. A hostname is not resolved, so a name that points at
-a private address is not blocked. That is a real limit: the client chooses the
-URL.
+non-loopback IP literals. The transport resolves the hostname and checks every
+address at dial time, refusing private, link-local and other blocked ranges,
+including mixed public/private answers. The connection uses the validated
+address rather than resolving it again. Loopback fetches are allowed only in
+local-development mode. `MCP_AUTH_CLIENT_ID_METADATA_HOSTS` can further restrict
+the permitted metadata hosts.
 
 **A deliberate deviation from the MCP authorization spec.** That spec states
 that "all redirect URIs MUST be either localhost or use HTTPS". Read literally
@@ -586,25 +613,19 @@ conflate because they're both "redirect URIs":
 
 ## Verified identity providers
 
-The server is provider-neutral by construction, but "neutral" is only a claim
-until it is run against providers that share no code. These were verified end
-to end — dynamic client registration, consent, upstream login, ID token
-verification, `upstream_session` storage, MCP token issuance, and an
-authenticated `tools/call` on a resource server — changing **nothing but the
-connector entry**.
+The checked-in CI fixtures establish the following evidence:
 
-| Provider | Result | Notes |
-| --- | --- | --- |
-| Keycloak 26 | verified | Signs RS256. Sets session cookies `SameSite=None`, which forces `Secure`; browsers treat `http://localhost` as a secure context, non-browser test harnesses often do not. |
-| Dex | verified | Signs RS256. `skipApprovalScreen: true` removes a second consent step that is redundant when this server already renders one. |
-| GitLab CE 18 | verified | Signs RS256. Shows its own approval page on first authorization, then answers an already-authorized app with a *200 HTML redirect page* rather than a 302 — so a first run and a repeat run take different shapes. Its sign-in form is server-rendered entirely as `type="hidden"` inputs that Vue fills in, so field names (`user[login]`, `user[password]`) matter and input types do not. OAuth applications require an `organization_id` from GitLab 17 on. |
-| Authelia | not supported on plaintext loopback | Refuses a cookie domain without a period and requires an HTTPS `authelia_url`. An Authelia policy, not a limitation here; it needs a dotted hostname and TLS. |
+| Use case | Verification |
+| --- | --- |
+| Keycloak OIDC and stored upstream token exchange | [Compose stack](../deploy/docker-compose.e2e.yml) and [Compose client](../tests/e2e/compose_client.py) |
+| OIDC discovery, login and ID token checks | [Mock-provider E2E](../tests/e2e/test_oidc_provider_flow.py) |
+| Multiple providers, prefixed subjects and browser binding | [Login-method E2E](../tests/e2e/test_login_methods_flow.py) |
+| Google, GitHub and LDAP method behavior | [Go server tests](../auth-server/server/), using controlled mocks and fakes |
 
-Each was driven through the same ten checks — dynamic client registration,
-consent, upstream login, `/identity/callback`, token issuance, and an
-authenticated `initialize`, `tools/list` and `tools/call` — twice per provider,
-because several providers behave differently once an authorization is
-remembered.
+These fixtures do not certify every provider version or customer configuration.
+Dex, GitLab, Okta, Entra ID and other standards-compatible providers need their
+own callback, scopes, TLS and end-to-end sign-in checks. Real Google/GitHub
+accounts and a production LDAP directory are not exercised by these CI jobs.
 
 ### Split public and internal endpoints
 
@@ -706,12 +727,14 @@ audit `reason`.
 
 Do not use a Docker volume as the authoritative credential/state store for a multi-instance deployment. Volumes are node-local and create failover, backup, encryption, and access-control problems. A volume is acceptable only as a tightly controlled single-node development or explicitly managed single-node deployment choice. The enterprise default is a shared encrypted database for OAuth state and a secret manager/KMS/HSM for signing keys and confidential client credentials. Implement `Store` and `KeyProvider` adapters for the chosen services; the HTTP handlers do not change.
 
-The built-in `LocalKeyProvider` wraps the development PEM loader and ephemeral generated key. Production should replace it with a `KeyProvider` backed by KMS/HSM signing or a secret manager with rotation support. The server never needs to persist raw refresh tokens or client secrets: it stores hashes, and the secret provider owns private key material.
+The built-in `LocalKeyProvider` wraps the development PEM loader and ephemeral generated key. Production should replace it with a `KeyProvider` backed by KMS/HSM signing or a secret manager with rotation support. MCP refresh tokens and dynamically registered client secrets are stored as
+hashes. The separate upstream-session access and refresh tokens remain usable
+credentials in the store and require encryption and restricted access.
 
 ## Serving multiple resources
 
-One `auth-server` process serves **one connector** and an **allow-list of
-resources**. `MCP_AUTH_RESOURCES` takes a comma-separated list; `/authorize`
+In single-connector mode, one `auth-server` process serves **one connector**
+and an **allow-list of resources**. `MCP_AUTH_RESOURCES` takes a comma-separated list; `/authorize`
 and `/token` reject any `resource` parameter outside it, and each issued token
 is bound to the single resource the client asked for. Resource clients used for
 token exchange are each bound to exactly one configured resource, and a subject
@@ -727,11 +750,14 @@ file with multiple entries is for choosing between them across deployments (a
 staging connector and a production connector, say), not for one running server
 to authenticate against several providers at once.
 
-So: several resources behind one identity provider is a single process with
-`MCP_AUTH_RESOURCES`. Several *identity providers* still needs one process
-each.
+To offer several identity providers on one page, use
+`MCP_AUTH_LOGIN_METHODS_FILE` instead of `MCP_AUTH_CONNECTOR`. That mode supports
+multiple resources but does not retain provider access/refresh tokens or use the
+single-connector `upstream_session` / `rfc8693` exchanger. Use
+[external credential connectors](external-credentials.md) for resource-side
+credentials. Accounts from separate methods remain separate identities.
 
-To front more than one upstream provider, run one `auth-server` process per
+If each provider needs its own upstream-session or RFC 8693 exchanger, run one `auth-server` process per
 provider — each with its own `MCP_AUTH_CONNECTOR`, `MCP_AUTH_RESOURCES`, and
 `MCP_AUTH_LISTEN_ADDR` — behind a shared reverse proxy that routes by hostname
 or path. Nothing in the current design prevents
@@ -762,36 +788,73 @@ internal-api-auth.example.com {
 }
 ```
 
-Each backend is a separate `auth-server` process, e.g.:
+Each backend is a separate `auth-server` process. Install the release binary on
+`PATH`, provision both signing keys and writable database directories, configure
+the two named connectors and inject their secret environment variables first.
+With only the local Caddy proxy able to reach these loopback listeners:
 
 ```bash
 MCP_AUTH_ISSUER=https://inventory-auth.example.com \
 MCP_AUTH_RESOURCES=https://mcp.example.com/inventory/mcp \
 MCP_AUTH_CONNECTOR=inventory \
 MCP_AUTH_LISTEN_ADDR=127.0.0.1:8081 \
-go run ./auth-server/cmd/auth-server &
+MCP_AUTH_TRUST_PROXY_TLS=true \
+MCP_AUTH_CONNECTORS_FILE=/etc/mcp-auth/connectors.json \
+MCP_AUTH_PRIVATE_KEY_FILE=/etc/mcp-auth/inventory-signing.pem \
+MCP_AUTH_STORE=sqlite MCP_AUTH_DATABASE_URL=/var/lib/mcp-auth/inventory.db \
+mcp-auth-server &
 
 MCP_AUTH_ISSUER=https://internal-api-auth.example.com \
 MCP_AUTH_RESOURCES=https://mcp.example.com/internal-api/mcp \
 MCP_AUTH_CONNECTOR=internal-api \
 MCP_AUTH_LISTEN_ADDR=127.0.0.1:8082 \
-go run ./auth-server/cmd/auth-server &
+MCP_AUTH_TRUST_PROXY_TLS=true \
+MCP_AUTH_CONNECTORS_FILE=/etc/mcp-auth/connectors.json \
+MCP_AUTH_PRIVATE_KEY_FILE=/etc/mcp-auth/internal-api-signing.pem \
+MCP_AUTH_STORE=sqlite MCP_AUTH_DATABASE_URL=/var/lib/mcp-auth/internal-api.db \
+mcp-auth-server &
 ```
 
 Each instance needs its own `MCP_AUTH_DATABASE_URL` (or its own credentials
 to a shared database) so their client registrations, consent state, and
 signing keys don't collide.
 
+## HTTPS deployment boundary
+
+```mermaid
+flowchart LR
+    client["MCP client and browser"]
+    proxy["HTTPS reverse proxy"]
+    subgraph backend["Proxy-only network boundary"]
+        auth["mcp-auth HTTP listener"]
+        state[("Durable OAuth state")]
+        key["Persistent signing key"]
+        auth --> state
+        auth --> key
+    end
+    client -->|"HTTPS"| proxy
+    proxy -->|"HTTP with proxy TLS header"| auth
+    classDef boundary fill:#eef2ff,stroke:#6366f1,color:#1e1b4b
+    classDef storage fill:#f8fafc,stroke:#64748b,color:#0f172a
+    style backend fill:#f8fafc,stroke:#cbd5e1,color:#334155
+    class proxy,auth boundary
+    class state,key,client storage
+```
+
+Set `MCP_AUTH_REQUIRE_HTTPS=true` and `MCP_AUTH_TRUST_PROXY_TLS=true` on the
+backend. The header is trusted only because the network boundary prevents
+callers from reaching the HTTP listener directly.
+
 ## Production checklist
 
 - Use an HTTPS issuer and canonical resource URI.
-- Terminate TLS on this process, or set `MCP_AUTH_TRUST_PROXY_TLS=true` **and**
-  restrict network access so only the terminating proxy can reach it. The
-  setting is a claim about your topology; a NetworkPolicy or equivalent is what
-  makes the claim true.
+- For the shipped binary, terminate TLS at a reverse proxy, set
+  `MCP_AUTH_TRUST_PROXY_TLS=true`, overwrite `X-Forwarded-Proto` there, and
+  restrict the backend to that proxy. Embedded handlers may use a TLS listener.
+  Keep `MCP_AUTH_REQUIRE_HTTPS=true` for production.
 - Use a secret-managed persistent signing key and a planned rotation process.
 - Replace `MemoryStore` with a transactional durable implementation.
-- Integrate a real `IdentityProvider` and define consent/session policy.
+- Configure a real upstream connector or login-method registry and define consent/session policy.
 - Keep the consent-page response headers at the proxy (`Content-Security-Policy`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store`). `consent.website_url` and `consent.support_url` must be absolute HTTPS URLs; `http`, `javascript:`, `data:`, and protocol-relative values are rejected at startup.
 - Restrict registration, scopes, CORS, and trusted origins.
 - Set short access-token TTLs and monitor refresh-token reuse.

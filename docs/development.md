@@ -9,6 +9,7 @@ python -m venv .venv
 . .venv/bin/activate
 python -m pip install -e '.[dev,fastmcp]'
 npm ci --prefix auth-client/typescript
+npm run build --prefix auth-client/typescript
 npm ci --prefix examples/typescript-mcp
 (cd auth-server && GOWORK=off go test ./...)
 (cd auth-client/go && GOWORK=off go test ./...)
@@ -47,6 +48,28 @@ python -m build
 docker compose -f deploy/docker-compose.e2e.yml up --build --abort-on-container-exit --exit-code-from e2e-client
 docker compose -f deploy/docker-compose.e2e.yml down --volumes --remove-orphans
 ```
+
+## Verify the supported use cases
+
+The [use-case guide](use-cases.md#verification-coverage) maps each supported
+flow to its executable fixture. Run the unit suites above first. For the
+black-box authorization flows, install Go, Node and uv, then from the repository
+root run:
+
+```bash
+uv sync --locked --extra dev --extra fastmcp --python 3.12
+npm ci --prefix auth-client/typescript
+npm run build --prefix auth-client/typescript
+npm ci --prefix examples/typescript-mcp
+uv run pytest tests/e2e -m e2e -q
+```
+
+The explicit `-m e2e` matters: the default pytest configuration excludes these
+tests. Without prebuilt binaries, fixtures compile/run the Go server and Go
+example themselves. CI supplies `MCP_AUTH_SERVER_BINARY` and
+`MCP_AUTH_GO_SERVER_BINARY` to avoid repeated builds. Mock providers run on
+loopback; this suite does not need real IdP credentials. The separate Compose
+command above tests Keycloak and stored upstream-token exchange.
 
 CI runs the local authorization flow against real Python, Go, and TypeScript
 resource servers. It also runs Compose MCP OAuth compatibility with Keycloak
