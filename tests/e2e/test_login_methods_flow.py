@@ -45,6 +45,7 @@ def _connector(provider_url: str, callback: str, client_id: str) -> dict[str, ob
         "jwks_uri": provider_url + "/jwks",
         "client_id": client_id,
         "client_secret_env": "",
+        "exchange_client_id": client_id + "-exchange",
         "scopes": ["openid"],
         "token_endpoint_auth_method": "none",
         "allowed_upstream_callback_uris": [callback],
