@@ -104,6 +104,85 @@ func TestLDAPSearchModeSignsInAndReturnsClaims(t *testing.T) {
 	}
 }
 
+func TestLDAPAnonymousSearchStillRequiresTheUsersPassword(t *testing.T) {
+	config := searchConfig()
+	config.BindDN, config.BindSecretEnv = "", ""
+	config.AnonymousSearch = true
+	for _, test := range []struct {
+		name, password string
+		found, valid   bool
+	}{
+		{name: "correct password", password: "pw", found: true, valid: true},
+		{name: "wrong password", password: "wrong", found: true},
+		{name: "unknown account", password: "pw"},
+		{name: "empty password", found: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			method, err := NewLDAPLoginMethod(config, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			directory := &fakeDirectory{passwords: map[string]string{aliceEntry().DN: "pw"}}
+			if test.found {
+				directory.entries = []*ldap.Entry{aliceEntry()}
+			}
+			method.dial = directory.dial
+			identity, err := method.Authenticate(context.Background(), IdentityRequest{}, attempt("alice", test.password))
+			if test.valid {
+				if err != nil || identity.Subject != "b1f6-alice" || identity.Claims["email"] != "alice@example.com" {
+					t.Fatalf("identity = %+v, error = %v", identity, err)
+				}
+			} else if !errors.Is(err, ErrInvalidCredentials) {
+				t.Fatalf("error = %v, want invalid credentials", err)
+			}
+			wantBinds := 0
+			if test.found && test.password != "" {
+				wantBinds = 1
+			}
+			if len(directory.binds) != wantBinds {
+				t.Fatalf("got %d binds, want %d user binds", len(directory.binds), wantBinds)
+			}
+			for _, bind := range directory.binds {
+				if bind[0] != aliceEntry().DN || bind[1] == "" {
+					t.Fatal("anonymous search performed a service or empty-password bind")
+				}
+			}
+			if test.password == "" && directory.dialed != 0 {
+				t.Fatal("empty password reached the directory")
+			}
+		})
+	}
+}
+
+func TestLDAPAnonymousSearchFailuresDoNotBecomeSuccessfulBinds(t *testing.T) {
+	config := searchConfig()
+	config.BindDN, config.BindSecretEnv = "", ""
+	config.AnonymousSearch = true
+	for _, test := range []struct {
+		name      string
+		entries   []*ldap.Entry
+		searchErr error
+		want      error
+	}{
+		{name: "search forbidden", searchErr: ldap.NewError(ldap.LDAPResultInsufficientAccessRights, errors.New("search denied")), want: ErrMethodUnavailable},
+		{name: "missing DN", entries: []*ldap.Entry{ldap.NewEntry("", map[string][]string{"entryUUID": {"id"}})}, want: ErrMethodUnavailable},
+		{name: "ambiguous search", entries: []*ldap.Entry{aliceEntry(), aliceEntry()}, want: ErrInvalidCredentials},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			method, err := NewLDAPLoginMethod(config, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			directory := &fakeDirectory{entries: test.entries, searchErr: test.searchErr}
+			method.dial = directory.dial
+			_, err = method.Authenticate(context.Background(), IdentityRequest{}, attempt("alice", "pw"))
+			if !errors.Is(err, test.want) || len(directory.binds) != 0 {
+				t.Fatalf("error = %v, user binds = %d", err, len(directory.binds))
+			}
+		})
+	}
+}
+
 func TestLDAPEscapesTheUsernameInTheFilter(t *testing.T) {
 	directory := &fakeDirectory{passwords: map[string]string{"cn=svc,dc=example,dc=com": "service-secret"}}
 	method := newSearchMethod(t, directory)
@@ -321,6 +400,20 @@ func TestLDAPSubjectValues(t *testing.T) {
 			t.Fatal("distinct GUIDs collided")
 		}
 	})
+	t.Run("text cannot impersonate a binary subject", func(t *testing.T) {
+		binary, err := ldapSubjectValue(entry("x", []byte{0xff, 0xfe}), "x")
+		if err != nil {
+			t.Fatal(err)
+		}
+		text, err := ldapSubjectValue(entry("x", []byte(binary)), "x")
+		if err != nil || text == binary {
+			t.Fatalf("text subject %q collided with binary subject %q: %v", text, binary, err)
+		}
+		encodedText, err := ldapSubjectValue(entry("x", []byte(text)), "x")
+		if err != nil || encodedText == text || encodedText == binary {
+			t.Fatal("nested encoding prefixes collided")
+		}
+	})
 	t.Run("control characters are encoded", func(t *testing.T) {
 		got, _ := ldapSubjectValue(entry("x", []byte("a\x01b")), "x")
 		if !strings.HasPrefix(got, "hex:") {
@@ -366,6 +459,12 @@ func TestLDAPConfigValidation(t *testing.T) {
 		"start_tls on ldaps":          mutate(func(c *LDAPConfig) { c.StartTLS = true }),
 		"http scheme":                 mutate(func(c *LDAPConfig) { c.URL = "http://ldap.example.com" }),
 		"no host":                     mutate(func(c *LDAPConfig) { c.URL = "ldaps://" }),
+		"credentials in URL":          mutate(func(c *LDAPConfig) { c.URL = "ldaps://user:private@ldap.example.com" }),
+		"search path in URL":          mutate(func(c *LDAPConfig) { c.URL = "ldaps://ldap.example.com/dc=example" }),
+		"query in URL":                mutate(func(c *LDAPConfig) { c.URL = "ldaps://ldap.example.com?scope=sub" }),
+		"fragment in URL":             mutate(func(c *LDAPConfig) { c.URL = "ldaps://ldap.example.com#ignored" }),
+		"anonymous and service bind":  mutate(func(c *LDAPConfig) { c.AnonymousSearch = true }),
+		"anonymous with partial bind": mutate(func(c *LDAPConfig) { c.AnonymousSearch = true; c.BindSecretEnv = "" }),
 		"both modes":                  mutate(func(c *LDAPConfig) { c.UserDNTemplate = "uid={username},dc=x" }),
 		"neither mode":                mutate(func(c *LDAPConfig) { *c = LDAPConfig{ID: "corp", URL: c.URL, SubjectAttribute: "dn"} }),
 		"search without bind dn":      mutate(func(c *LDAPConfig) { c.BindDN = "" }),

@@ -64,6 +64,7 @@ type loginLDAPEntry struct {
 	CAFile           string            `json:"ca_file"`
 	BindDN           string            `json:"bind_dn"`
 	BindSecretEnv    string            `json:"bind_password_env"`
+	AnonymousSearch  bool              `json:"anonymous_search"`
 	UserSearchBase   string            `json:"user_search_base"`
 	UserFilter       string            `json:"user_filter"`
 	UserDNTemplate   string            `json:"user_dn_template"`
@@ -169,7 +170,8 @@ func ParseLoginMethods(data []byte, options LoginMethodsOptions) (*LoginRegistry
 					ID: common.ID, Label: defaultLabel(label, "Sign in with your directory account"),
 					URL: entry.URL, StartTLS: entry.StartTLS, CAFile: entry.CAFile,
 					BindDN: entry.BindDN, BindSecretEnv: entry.BindSecretEnv,
-					UserSearchBase: entry.UserSearchBase, UserFilter: entry.UserFilter,
+					AnonymousSearch: entry.AnonymousSearch,
+					UserSearchBase:  entry.UserSearchBase, UserFilter: entry.UserFilter,
 					UserDNTemplate: entry.UserDNTemplate, SubjectAttribute: entry.SubjectAttribute,
 					Claims: entry.Claims, UsernameLabel: entry.UsernameLabel, PasswordLabel: entry.PasswordLabel,
 				}, options.AllowInsecure)

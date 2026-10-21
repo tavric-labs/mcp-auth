@@ -1,0 +1,15 @@
+{
+  "methods": [
+    {
+      "id": "directory",
+      "type": "ldap",
+      "label": "Directory account",
+      "url": "ldaps://ldap.example.com:636",
+      "anonymous_search": true,
+      "user_search_base": "ou=people,dc=example,dc=com",
+      "user_filter": "(uid={username})",
+      "subject_attribute": "entryUUID",
+      "claims": {"email": "mail", "name": "displayName"}
+    }
+  ]
+}

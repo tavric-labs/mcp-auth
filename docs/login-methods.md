@@ -121,6 +121,12 @@ Find the person's entry in one of two ways:
 - **Search** (`bind_dn`, `bind_password_env`, `user_search_base`, `user_filter`):
   a service account searches for the entry, which must match **exactly one**
   entry, then `mcp-auth` binds as it. `user_filter` contains `{username}` once.
+- **Anonymous search** (`anonymous_search: true`, `user_search_base`,
+  `user_filter`): for directories that allow unauthenticated reads, search
+  without a service bind, then bind as the matched user with their password.
+  Omit both `bind_dn` and `bind_password_env`. This must be enabled explicitly;
+  missing service credentials never silently enable anonymous search. See
+  [`examples/login-methods.ldap.example.json`](../examples/login-methods.ldap.example.json).
 - **Direct bind** (`user_dn_template`): build the DN from the username, for
   example `uid={username},ou=people,dc=example,dc=com`. Use this when every
   account lives in one flat container. After the bind, `mcp-auth` reads the
@@ -132,10 +138,10 @@ Configure one or the other, not both.
 
 | Field | Meaning |
 | --- | --- |
-| `url` | `ldaps://host[:port]`, or `ldap://host[:port]` with `start_tls`. |
+| `url` | `ldaps://host[:port]`, or `ldap://host[:port]` with `start_tls`. User information, search paths, queries and fragments are rejected; configure searches through the separate fields. |
 | `start_tls` | Upgrade an `ldap://` connection. Not valid with `ldaps://`. |
 | `ca_file` | PEM bundle of trusted CAs. Empty uses the system roots. |
-| `subject_attribute` | **Required.** The attribute used as the person's subject, or `dn`. Choose one that never changes for a person (`entryUUID`, `employeeNumber`, `objectGUID`). A name that can be renamed or reused would let a new account inherit an old account's access. The attribute must have exactly one value and is used exactly as stored, with no trimming. A binary value such as `objectGUID`, or one that is not printable text, becomes `hex:` followed by its bytes in lowercase hex. |
+| `subject_attribute` | **Required.** The attribute used as the person's subject, or `dn`. Choose one that never changes for a person (`entryUUID`, `employeeNumber`, `objectGUID`). A name that can be renamed or reused would let a new account inherit an old account's access. The attribute must have exactly one value and is used exactly as stored, with no trimming. Binary or non-printable values become `hex:` followed by their bytes in lowercase hex. Text starting with `hex:` is also encoded so it cannot collide with a binary identity. |
 | `claims` | Optional map of claim name to attribute, for example `{"email": "mail"}`. |
 | `username_label`, `password_label` | Optional form labels. |
 

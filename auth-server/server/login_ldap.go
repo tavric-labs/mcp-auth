@@ -36,8 +36,9 @@ const (
 // LDAPConfig configures a directory login. It supports two ways to find the
 // person's entry:
 //
-//   - search: a service account searches UserSearchBase with UserFilter, which
-//     must match exactly one entry; the server then binds as that entry.
+//   - search: a service account (or explicitly anonymous connection) searches
+//     UserSearchBase with UserFilter, which must match exactly one entry;
+//     the server then binds as that entry.
 //   - direct bind: UserDNTemplate builds the entry's DN from the account name.
 //
 // Exactly one of the two is configured.
@@ -51,16 +52,19 @@ type LDAPConfig struct {
 	CAFile string
 
 	// Search mode.
-	BindDN         string
-	BindSecretEnv  string
-	UserSearchBase string
-	UserFilter     string
+	BindDN        string
+	BindSecretEnv string
+	// AnonymousSearch explicitly opts into directory searches without a service
+	// bind. The person's own non-empty password is still checked with a bind.
+	AnonymousSearch bool
+	UserSearchBase  string
+	UserFilter      string
 
 	// Direct-bind mode.
 	UserDNTemplate string
 
 	// SubjectAttribute is the entry attribute used as the subject, or "dn".
-	// Choose one that never changes for a person (entryUUID, objectGUID as text,
+	// Choose one that never changes for a person (entryUUID, objectGUID,
 	// employeeNumber): a name that can be renamed or reused would let a new
 	// account inherit an old account's access.
 	SubjectAttribute string
@@ -118,6 +122,9 @@ func (c LDAPConfig) validate(allowInsecure bool) error {
 	if err != nil || parsed.Hostname() == "" {
 		return errors.New("url must be ldaps://host or ldap://host")
 	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
+		return errors.New("url must not contain credentials, a search path, query parameters or a fragment")
+	}
 	switch parsed.Scheme {
 	case "ldaps":
 	case "ldap":
@@ -130,7 +137,7 @@ func (c LDAPConfig) validate(allowInsecure bool) error {
 	if parsed.Scheme == "ldaps" && c.StartTLS {
 		return errors.New("start_tls applies to ldap:// URLs, not ldaps://")
 	}
-	search := c.UserSearchBase != "" || c.UserFilter != "" || c.BindDN != "" || c.BindSecretEnv != ""
+	search := c.UserSearchBase != "" || c.UserFilter != "" || c.BindDN != "" || c.BindSecretEnv != "" || c.AnonymousSearch
 	direct := c.UserDNTemplate != ""
 	switch {
 	case search && direct:
@@ -139,8 +146,15 @@ func (c LDAPConfig) validate(allowInsecure bool) error {
 		return errors.New("configure a search (user_search_base, user_filter, bind_dn, bind_password_env) or user_dn_template")
 	}
 	if search {
-		if c.UserSearchBase == "" || c.UserFilter == "" || c.BindDN == "" || c.BindSecretEnv == "" {
-			return errors.New("search mode requires user_search_base, user_filter, bind_dn and bind_password_env")
+		if c.UserSearchBase == "" || c.UserFilter == "" {
+			return errors.New("search mode requires user_search_base and user_filter")
+		}
+		if c.AnonymousSearch {
+			if c.BindDN != "" || c.BindSecretEnv != "" {
+				return errors.New("anonymous_search cannot be combined with bind_dn or bind_password_env")
+			}
+		} else if c.BindDN == "" || c.BindSecretEnv == "" {
+			return errors.New("search mode requires bind_dn and bind_password_env, or explicit anonymous_search")
 		}
 		if strings.Count(c.UserFilter, ldapUsernamePlaceholder) != 1 {
 			return errors.New("user_filter must contain " + ldapUsernamePlaceholder + " exactly once")
@@ -311,8 +325,10 @@ func (m *LDAPLoginMethod) attributes() []string {
 }
 
 func (m *LDAPLoginMethod) findEntry(conn ldapConn, username string, attributes []string) (*ldap.Entry, error) {
-	if err := conn.Bind(m.config.BindDN, m.bindPassword); err != nil {
-		return nil, fmt.Errorf("%w: service account bind: %v", ErrMethodUnavailable, err)
+	if !m.config.AnonymousSearch {
+		if err := conn.Bind(m.config.BindDN, m.bindPassword); err != nil {
+			return nil, fmt.Errorf("%w: service account bind: %v", ErrMethodUnavailable, err)
+		}
 	}
 	filter := strings.Replace(m.config.UserFilter, ldapUsernamePlaceholder, ldap.EscapeFilter(username), 1)
 	result, err := conn.Search(ldap.NewSearchRequest(
@@ -327,6 +343,9 @@ func (m *LDAPLoginMethod) findEntry(conn ldapConn, username string, attributes [
 	}
 	switch len(result.Entries) {
 	case 1:
+		if strings.TrimSpace(result.Entries[0].DN) == "" {
+			return nil, fmt.Errorf("%w: user search returned an entry without a DN", ErrMethodUnavailable)
+		}
 		return result.Entries[0], nil
 	case 0:
 		return nil, ErrInvalidCredentials
@@ -407,7 +426,9 @@ func ldapSubjectValue(entry *ldap.Entry, attribute string) (string, error) {
 	if len(raw) == 0 {
 		return "", fmt.Errorf("subject attribute %q is empty", attribute)
 	}
-	if !utf8.Valid(raw) || strings.IndexFunc(string(raw), func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+	// Reserve the encoding prefix: a literal "hex:fffe" must not have the
+	// same subject as the binary bytes ff fe from a different directory entry.
+	if strings.HasPrefix(string(raw), "hex:") || !utf8.Valid(raw) || strings.IndexFunc(string(raw), func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
 		return "hex:" + hex.EncodeToString(raw), nil
 	}
 	return string(raw), nil

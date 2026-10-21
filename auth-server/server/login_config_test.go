@@ -107,6 +107,34 @@ func TestParseLoginMethodsErrorNamesTheMethod(t *testing.T) {
 	}
 }
 
+func TestParseLoginMethodsAnonymousLDAPSearch(t *testing.T) {
+	document := `{"methods":[{"id":"directory","type":"ldap","url":"ldaps://ldap.example.com","anonymous_search":true,"user_search_base":"ou=people,dc=example,dc=com","user_filter":"(uid={username})","subject_attribute":"entryUUID"}]}`
+	registry, err := ParseLoginMethods([]byte(document), LoginMethodsOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	method, ok := registry.entries[0].Method.(*LDAPLoginMethod)
+	if !ok || !method.config.AnonymousSearch || method.config.BindDN != "" || method.bindPassword != "" {
+		t.Fatal("anonymous search was not loaded independently of service credentials")
+	}
+	// Omitting the flag must never silently downgrade a missing service bind.
+	document = strings.Replace(document, `"anonymous_search":true,`, "", 1)
+	if _, err := ParseLoginMethods([]byte(document), LoginMethodsOptions{}); err == nil {
+		t.Fatal("missing service credentials implicitly enabled anonymous search")
+	}
+}
+
+func TestLoadAnonymousLDAPExample(t *testing.T) {
+	registry, err := LoadLoginMethods("../../examples/login-methods.ldap.example.json", LoginMethodsOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	method, ok := registry.entries[0].Method.(*LDAPLoginMethod)
+	if !ok || !method.config.AnonymousSearch || method.config.SubjectAttribute != "entryUUID" {
+		t.Fatal("LDAP example must use explicit anonymous search and a stable subject")
+	}
+}
+
 func TestParseLoginMethodsOIDCUsesAConnectorsFile(t *testing.T) {
 	loginTestEnv(t)
 	connectors := `{"okta": {
