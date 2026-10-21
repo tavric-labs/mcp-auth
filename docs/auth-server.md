@@ -117,7 +117,7 @@ docker run --rm -p 8080:8080 \
   -e MCP_AUTH_RESOURCES=http://localhost:8081/mcp \
   -e MCP_AUTH_LOCAL_DEVELOPMENT=true \
   -e MCP_AUTH_REQUIRE_HTTPS=false \
-  princekrroshan01/mcp-auth-server:0.4.4
+  princekrroshan01/mcp-auth-server:0.6.0
 ```
 
 That command is local-development-only: it disables TLS and the upstream

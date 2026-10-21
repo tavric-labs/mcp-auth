@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--repository", default="mcp-runtime/mcp-auth")
+parser.add_argument("--repository", default="tavric-labs/mcp-auth")
 parser.add_argument("--ref", required=True, help="Published Git commit or tag")
 parser.add_argument("--output", type=Path, required=True)
 args = parser.parse_args()

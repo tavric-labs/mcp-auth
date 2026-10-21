@@ -22,7 +22,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Agent-Hellboy/mcp-auth.git",
+    "url": "git+https://github.com/tavric-labs/mcp-auth.git",
     "directory": "auth-client/typescript"
   },
   "devDependencies": {

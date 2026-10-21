@@ -1,5 +1,9 @@
 # Examples
 
+Runnable resource servers for [mcp-auth](../README.md), maintained by
+[Tavric Labs](https://github.com/tavric-labs). For the deployment and SDK reading
+paths, start with the [documentation index](../docs/README.md).
+
 `examples/demo-mcp` is a dummy MCP resource server used by the Keycloak
 Compose end-to-end job. It depends only on the in-repo Python SDK.
 

@@ -3,22 +3,28 @@
 Requirements: Go 1.26+ for the authorization server, Python 3.12+, and Node.js 22+. The Go client module declares `go 1.18` so older toolchains can import it; CI still tests that module on Go 1.26 and 1.27. Python 3.11 is not supported: 3.12 is the oldest interpreter this repository type-checks, even though CPython still supports 3.11. CI tests Python 3.12, 3.13, and 3.14, and Node 22, 24, and 26 for the TypeScript SDK. End-to-end jobs stay on one version of each language (Go 1.26, Python 3.12, Node 24).
 
 ```bash
+git clone https://github.com/tavric-labs/mcp-auth.git
+cd mcp-auth
 python -m venv .venv
 . .venv/bin/activate
 python -m pip install -e '.[dev,fastmcp]'
 npm ci --prefix auth-client/typescript
 npm ci --prefix examples/typescript-mcp
-go test ./auth-server/... ./auth-client/go/...
+(cd auth-server && GOWORK=off go test ./...)
+(cd auth-client/go && GOWORK=off go test ./...)
 pytest
 ```
 
 Run the authorization server in local mode. It generates an ephemeral RSA key when no key file is configured; do not use that mode for production.
 
 ```bash
-MCP_AUTH_LOCAL_DEVELOPMENT=true \
-MCP_AUTH_REQUIRE_HTTPS=false \
-MCP_AUTH_REGISTRATION_ENABLED=true \
-go run ./auth-server/cmd/auth-server
+(
+  cd auth-server
+  MCP_AUTH_LOCAL_DEVELOPMENT=true \
+  MCP_AUTH_REQUIRE_HTTPS=false \
+  MCP_AUTH_REGISTRATION_ENABLED=true \
+  GOWORK=off go run ./cmd/auth-server
+)
 ```
 
 The default issuer is `http://localhost:8080`, the resource audience is `http://localhost:8081/mcp`, and metadata is available at `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource`, and `/.well-known/jwks.json`.
@@ -32,8 +38,10 @@ mypy auth-client/python/src
 pytest -q
 npm test --prefix auth-client/typescript
 npm run typecheck --prefix examples/typescript-mcp
-go test ./auth-server/... ./auth-client/go/...
-go vet ./auth-server/... ./auth-client/go/...
+(cd auth-server && GOWORK=off go test ./...)
+(cd auth-client/go && GOWORK=off go test ./...)
+(cd auth-server && GOWORK=off go vet ./...)
+(cd auth-client/go && GOWORK=off go vet ./...)
 uv run pip-audit --skip-editable
 python -m build
 docker compose -f deploy/docker-compose.e2e.yml up --build --abort-on-container-exit --exit-code-from e2e-client
@@ -56,9 +64,14 @@ and `SHA256SUMS`. SDK packages retain the versions declared in their manifests.
 To verify downloaded packages, run `sha256sum --check SHA256SUMS` in the directory
 containing all release assets. GitHub also provides source archives automatically.
 
+The repository is maintained under [Tavric Labs](https://github.com/tavric-labs).
+Use `tavric-labs/mcp-auth` for source, issues, release assets and package repository
+metadata. Go imports follow the current `go.mod` declarations; Docker images
+are published to `princekrroshan01/mcp-auth-server`.
+
 `.github/workflows/dockerhub-readme.yml` syncs the Docker Hub overview on releases,
 README/image changes on `main`, or manual dispatch. Relative links become public
-URLs pinned to the triggering commit. Both workflows use repository secrets
+URLs in the triggering GitHub repository, pinned to the triggering commit. Both workflows use repository secrets
 `DOCKER_USERNAME` and `DOCKER_PASSWORD`; the latter is a Docker Hub access token
 with read/write/delete scope, as required by the README update action.
 

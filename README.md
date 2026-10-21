@@ -1,7 +1,7 @@
 # mcp-auth
 
-[![CI](https://github.com/mcp-runtime/mcp-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/mcp-runtime/mcp-auth/actions/workflows/ci.yml)
-[![CodeQL](https://github.com/mcp-runtime/mcp-auth/actions/workflows/codeql.yml/badge.svg)](https://github.com/mcp-runtime/mcp-auth/actions/workflows/codeql.yml)
+[![CI](https://github.com/tavric-labs/mcp-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/tavric-labs/mcp-auth/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/tavric-labs/mcp-auth/actions/workflows/codeql.yml/badge.svg)](https://github.com/tavric-labs/mcp-auth/actions/workflows/codeql.yml)
 [![Security policy](https://img.shields.io/badge/security-policy-4C1?logo=securityscorecard)](SECURITY.md)
 [![Container scan](https://img.shields.io/badge/container%20scan-Trivy-1904DA?logo=aqua)](.github/workflows/ci.yml)
 [![Dependency audit](https://img.shields.io/badge/dependencies-audited-2EA44F)](.github/workflows/ci.yml)
@@ -15,7 +15,7 @@
 [![Node tested 22 | 24 | 26](https://img.shields.io/badge/Node%20tested-22%20%7C%2024%20%7C%2026-5FA04E?logo=node.js&logoColor=white)](.github/workflows/ci.yml)
 [![TypeScript 5.9](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](auth-client/typescript/package.json)
 [![MCP authorization](https://img.shields.io/badge/MCP-authorization-7C3AED)](docs/architecture.md)
-[![GitHub release](https://img.shields.io/github/v/release/mcp-runtime/mcp-auth?display_name=tag)](https://github.com/mcp-runtime/mcp-auth/releases)
+[![GitHub release](https://img.shields.io/github/v/release/tavric-labs/mcp-auth?display_name=tag)](https://github.com/tavric-labs/mcp-auth/releases)
 [![Docker pulls](https://img.shields.io/docker/pulls/princekrroshan01/mcp-auth-server)](https://hub.docker.com/r/princekrroshan01/mcp-auth-server)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -41,6 +41,11 @@ issuer, and ID tokens may use RS256, PS256, or ES256. See
 [connect an organization's identity provider](docs/auth-server.md#connect-an-organizations-identity-provider)
 for setup. The provider's upstream protocol is separate from the OAuth 2.1
 flow between the MCP client and mcp-auth.
+
+Maintained by [Tavric Labs](https://github.com/tavric-labs).
+Browse the [documentation](docs/README.md), [releases](https://github.com/tavric-labs/mcp-auth/releases),
+or [report a bug](https://github.com/tavric-labs/mcp-auth/issues). For security
+reports, follow the [security policy](SECURITY.md).
 
 ## Standards position
 
@@ -79,7 +84,7 @@ docker run --rm -p 8080:8080 \
   -e MCP_AUTH_RESOURCES=http://localhost:8081/mcp \
   -e MCP_AUTH_LOCAL_DEVELOPMENT=true \
   -e MCP_AUTH_REQUIRE_HTTPS=false \
-  princekrroshan01/mcp-auth-server:0.4.1
+  princekrroshan01/mcp-auth-server:0.6.0
 ```
 
 Local-development only — no TLS, no identity provider. See
@@ -112,14 +117,24 @@ Local-development only — no TLS, no identity provider. See
 - `examples/typescript-mcp/` — protected TypeScript MCP JSON-RPC server
 - `examples/go-mcp/` — protected Go MCP JSON-RPC server
 
-The Python SDK installs from Git while its API settles:
+The repository is hosted at `tavric-labs/mcp-auth`. The Go module declarations
+currently retain the `github.com/Agent-Hellboy/mcp-auth/...` paths shown above;
+use those exact import paths until a release changes the module declarations.
+
+The Python SDK installs from the current repository while its API settles:
 
 ```bash
-python -m pip install "mcp-auth-client @ git+https://github.com/Agent-Hellboy/mcp-auth.git#subdirectory=auth-client/python"
+python -m pip install "mcp-auth-client @ git+https://github.com/tavric-labs/mcp-auth.git#subdirectory=auth-client/python"
 ```
 
 MCP authorization is optional at the protocol level. A resource server may still
 require it when it exposes private data or actions.
+
+## Contributing
+
+Start with [local development](docs/development.md) for setup, tests and release
+packaging. Open bugs and proposals in [GitHub issues](https://github.com/tavric-labs/mcp-auth/issues)
+and submit changes through [pull requests](https://github.com/tavric-labs/mcp-auth/pulls).
 
 ## Contributors
 

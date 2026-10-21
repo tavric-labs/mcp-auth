@@ -33,7 +33,7 @@ The Python package is currently Git-installable (a VCS pin is appropriate until
 the package is published to an index):
 
 ```bash
-python -m pip install "mcp-auth-client @ git+https://github.com/Agent-Hellboy/mcp-auth.git#subdirectory=auth-client/python"
+python -m pip install "mcp-auth-client @ git+https://github.com/tavric-labs/mcp-auth.git#subdirectory=auth-client/python"
 ```
 
 ## Python
@@ -67,6 +67,10 @@ Python requires 3.12 or newer. CPython still supports 3.11; this SDK does not, b
 ## Go
 
 Import `github.com/Agent-Hellboy/mcp-auth/auth-client/go/mcpauth`, configure `JWTVerifier`, and use `DiscoverProtectedResource`, `DiscoverAuthorizationServer`, `ParseWWWAuthenticate`, and `TokenExchangeClient`. The Go SDK uses the standard library and supports bounded token caching. Install the client module at the `auth-client/go/v0.3.0` release tag.
+
+The source repository is [tavric-labs/mcp-auth](https://github.com/tavric-labs/mcp-auth).
+The Go module still declares the import path above. A repository transfer does
+not change a Go module declaration; use the declared path for released Go SDKs.
 
 `auth-client/go/go.mod` declares `go 1.18`. That is the language floor of the client: the source uses the predeclared `any` alias and otherwise only long-stable standard-library APIs, and it has no third-party dependencies. The authorization server stays on Go 1.26, which is the oldest Go release this repository supports for the server. CI runs the client and server unit tests, including `govulncheck`, on Go 1.26 and 1.27. End-to-end and image builds stay on 1.26.
 
