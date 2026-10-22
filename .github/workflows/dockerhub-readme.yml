@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Prepare public links and rendered diagram
-        run: python3 scripts/prepare-docker-readme.py --ref "$GITHUB_SHA" --output "$RUNNER_TEMP/docker-readme.md"
+        run: python3 scripts/prepare-docker-readme.py --repository "$GITHUB_REPOSITORY" --ref "$GITHUB_SHA" --output "$RUNNER_TEMP/docker-readme.md"
       - name: Update Docker Hub overview
         uses: peter-evans/dockerhub-description@v4
         with:

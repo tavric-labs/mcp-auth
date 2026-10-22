@@ -5,7 +5,7 @@
 Please do not open a public issue for a suspected vulnerability. Use GitHub's
 private vulnerability reporting for this repository instead:
 
-https://github.com/Agent-Hellboy/mcp-auth/security/advisories/new
+https://github.com/tavric-labs/mcp-auth/security/advisories/new
 
 Include the affected component and version, reproduction steps, expected
 impact, and any suggested mitigation. Please avoid accessing data that is not

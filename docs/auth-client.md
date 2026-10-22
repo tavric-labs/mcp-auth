@@ -33,30 +33,48 @@ The Python package is currently Git-installable (a VCS pin is appropriate until
 the package is published to an index):
 
 ```bash
-python -m pip install "mcp-auth-client @ git+https://github.com/Agent-Hellboy/mcp-auth.git#subdirectory=auth-client/python"
+python -m pip install "mcp-auth-client @ git+https://github.com/tavric-labs/mcp-auth.git#subdirectory=auth-client/python"
 ```
 
 ## Python
 
-```python
-from mcp_auth_client import JWTVerifier, RemoteAuthProvider
+Install the optional FastMCP integration from a checkout before running this
+example: `python -m pip install -e '.[fastmcp]'`.
 
-verifier = JWTVerifier(
+```python
+from fastmcp import FastMCP
+from mcp_auth_client import build_remote_auth
+
+auth = build_remote_auth(
+    resource_url="https://mcp.example.com",
+    mcp_path="/mcp",
     jwks_uri="https://auth.example.com/.well-known/jwks.json",
     issuer="https://auth.example.com",
-    audience="https://mcp.example.com",
-    required_scopes={"tools:read"},
+    scopes_supported=["tools:read"],
 )
-auth = RemoteAuthProvider(
-    token_verifier=verifier,
-    authorization_servers=["https://auth.example.com"],
-    base_url="https://mcp.example.com",
-).build()
+mcp = FastMCP("protected-tools", auth=auth)
+
+
+@mcp.tool
+def ping() -> str:
+    return "pong"
+
+
+if __name__ == "__main__":
+    mcp.run(transport="streamable-http", host="127.0.0.1", port=8081, path="/mcp")
 ```
+
+The public resource is `https://mcp.example.com/mcp`, including the MCP path;
+route it to the local listener through HTTPS. `build_remote_auth` advertises
+`tools:read` and enforces it at the provider gate. With `RemoteAuthProvider`
+directly, configure both the verifier's required scopes and `scopes_supported`.
+Its adapter constructs FastMCP's own verifier; it does not call the direct SDK
+verifier or forward all of that verifier's optional settings. Use the direct
+verifier for custom token types such as credential-access assertions.
 
 Install the FastMCP extra only when using FastMCP. Otherwise call `JWTVerifier.verify` and return `unauthorized_headers(...)` from the resource server's 401 response.
 
-The verifier is explicitly RS256-only, refreshes JWKS on a bounded schedule, validates `iss`, `aud`, `exp`, `nbf`, `sub`, `typ` (absent, `JWT`, or `at+jwt`), and required scopes, and rejects unknown signing keys. Clock skew defaults to 60 seconds (`clock_skew` in Python, `ClockSkew` in Go, `clockSkewSeconds` in TypeScript). JWKS fetches time out after 10 seconds. `VerifyContext` and `RequireToken` propagate request cancellation and emit standards-compliant bearer challenges.
+The direct verifiers default to RS256 (Python can explicitly allow RS384/RS512; Go and TypeScript use RS256), refresh JWKS on a bounded schedule, validate `iss`, `aud`, `exp`, `nbf`, `sub`, `typ` (absent, `JWT`, or `at+jwt`), and required scopes, and reject unknown signing keys. Clock skew defaults to 60 seconds (`clock_skew` in Python, `ClockSkew` in Go, `clockSkewSeconds` in TypeScript). JWKS fetches time out after 10 seconds. `VerifyContext` and `RequireToken` propagate request cancellation and emit standards-compliant bearer challenges.
 
 `build_remote_auth`, `build_exchange_client`, `public_base_url`,
 `TokenExchangeError`, and `ExchangedToken` are part of the SDK itself. The
@@ -67,6 +85,10 @@ Python requires 3.12 or newer. CPython still supports 3.11; this SDK does not, b
 ## Go
 
 Import `github.com/Agent-Hellboy/mcp-auth/auth-client/go/mcpauth`, configure `JWTVerifier`, and use `DiscoverProtectedResource`, `DiscoverAuthorizationServer`, `ParseWWWAuthenticate`, and `TokenExchangeClient`. The Go SDK uses the standard library and supports bounded token caching. Install the client module at the `auth-client/go/v0.3.0` release tag.
+
+The source repository is [tavric-labs/mcp-auth](https://github.com/tavric-labs/mcp-auth).
+The Go module still declares the import path above. A repository transfer does
+not change a Go module declaration; use the declared path for released Go SDKs.
 
 `auth-client/go/go.mod` declares `go 1.18`. That is the language floor of the client: the source uses the predeclared `any` alias and otherwise only long-stable standard-library APIs, and it has no third-party dependencies. The authorization server stays on Go 1.26, which is the oldest Go release this repository supports for the server. CI runs the client and server unit tests, including `govulncheck`, on Go 1.26 and 1.27. End-to-end and image builds stay on 1.26.
 
@@ -203,7 +225,7 @@ The `insufficient_scope` code is what separates "you may retry with more scope"
 from "this token is rejected". Without it a client cannot tell the two apart and
 will not retry.
 
-A runnable example of the plain (non-FastMCP) Python path, including both
+A related example of the plain (non-FastMCP) Python path, including both
 challenges and the metadata document, lives in the MCP Runtime repository at
 `examples/mcp-auth-sdk-ping-py`; its Go counterpart is
 `examples/mcp-auth-sdk-ping`.
@@ -231,7 +253,12 @@ docker compose -f deploy/docker-compose.e2e.yml down --volumes --remove-orphans
 
 ## Token exchange
 
-`TokenExchangeClient` sends RFC 8693 parameters and returns a token tagged with the requested downstream audience. The endpoint must be `https` unless the caller opts out: `allow_insecure=True` in Python, `allowInsecure: true` in TypeScript, and `AllowInsecure: true` in Go. Loopback `http://` tests and examples pass that flag; the default is to refuse cleartext. Cache keys are a SHA-256 hex digest of the subject token, audience, and sorted scopes, so the raw token is not the map key. Python and TypeScript keep at most 128 entries and drop expired ones on read. Go's `TokenCache` is an LRU of the size passed to `NewTokenCache` and also drops expired entries on read. The returned token is a new downstream credential; do not substitute the inbound MCP client token. Keep these boundaries explicit: the MCP client token authenticates the caller to the resource server, the resource server's service credential authenticates its exchange request, and the downstream API token authenticates the provider call.
+`TokenExchangeClient` sends RFC 8693 parameters. Its result's `audience` field
+records the requested audience; it does not independently prove the provider
+issued a credential restricted to that audience. With `upstream_session`,
+requested audience/scope values are advisory and the stored provider token is
+returned. Configure the provider's actual grants for the target API; use a
+provider-backed `rfc8693` strategy when it must mint a different downstream grant. The endpoint must be `https` unless the caller opts out: `allow_insecure=True` in Python, `allowInsecure: true` in TypeScript, and `AllowInsecure: true` in Go. Loopback `http://` tests and examples pass that flag; the default is to refuse cleartext. Cache keys are a SHA-256 hex digest of the subject token, audience, and sorted scopes, so the raw token is not the map key. Python and TypeScript keep at most 128 entries and drop expired ones on read. Go's `TokenCache` is an LRU of the size passed to `NewTokenCache` and also drops expired entries on read. The returned token is a new downstream credential; do not substitute the inbound MCP client token. Keep these boundaries explicit: the MCP client token authenticates the caller to the resource server, the resource server's service credential authenticates its exchange request, and the downstream API token authenticates the provider call.
 
 ```mermaid
 sequenceDiagram

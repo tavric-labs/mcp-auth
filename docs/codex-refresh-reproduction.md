@@ -1,6 +1,6 @@
 # Two-process refresh and cancellation reproduction
 
-Runtime issue [#501](https://github.com/mcp-runtime/mcp-runtime/issues/501)
+Runtime issue [#501](https://github.com/tavric-labs/mcp-runtime/issues/501)
 requires client validation as well as server audit coverage. The fixture in
 `tests/e2e/codex_refresh_cancellation.py` launches two Codex app-server processes
 against a loopback OAuth issuer and MCP endpoint, using a shared temporary

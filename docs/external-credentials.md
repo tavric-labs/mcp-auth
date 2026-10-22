@@ -87,7 +87,7 @@ The assertion is a JWT signed with the same key set published at the JWKS URI:
 | `sid` | Session id the approval was based on |
 | `scope` | Scopes granted to the subject token |
 | `token_use` | `credential_access` (the exchange refuses an assertion presented as a subject token) |
-| `jti`, `iat`, `nbf`, `exp` | Single-use id; lifetime `assertion_ttl_seconds` (default 60, max 300) |
+| `jti`, `iat`, `nbf`, `exp` | Unique id; the resource server enforces single use. Lifetime `assertion_ttl_seconds` (default 60, max 300) |
 
 It contains **no credential material**.
 
@@ -147,7 +147,8 @@ invalid files fail startup:
 | `resource_client` | `client_id` unique; exactly one of `public_key_pem` or `public_key_file`; optional `algorithm` (`RS256` default, `PS256`, `ES256`) matching the key. Only the **public** key is configured. |
 | `assertion_ttl_seconds` | 1 to 300, default 60 |
 
-Login-provider selection stays at the server level (`MCP_AUTH_CONNECTOR`). A
+Login-provider selection stays at the server level: `MCP_AUTH_CONNECTOR` or
+`MCP_AUTH_LOGIN_METHODS_FILE`, never both. A
 connector entry carries no vendor settings, no login-provider reference, and no
 secret-manager configuration.
 

@@ -5,9 +5,11 @@ RFC 9728 metadata, returns bearer challenges, validates MCP access tokens, and
 exposes a `whoami` tool.
 
 ```bash
-cd examples/typescript-mcp
-npm install
-npm start
+# From the repository root, build the local SDK before starting the example.
+npm ci --prefix auth-client/typescript
+npm run build --prefix auth-client/typescript
+npm ci --prefix examples/typescript-mcp
+npm start --prefix examples/typescript-mcp
 ```
 
 The defaults expect the local-development authorization server on port 8080

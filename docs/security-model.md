@@ -4,7 +4,7 @@ What this server guarantees, and what your deployment still has to do.
 
 ## Authorization flow
 
-- Authorization Code + PKCE (`S256`) is required for public clients; there is no
+- Authorization Code + PKCE (`S256`) is required for all authorization-code clients; there is no
   implicit or password grant.
 - `/authorize` matches a dynamically registered `redirect_uri` exactly.
   Registration accepts the RFC 8252 shapes — HTTPS, loopback `http`, and
@@ -15,8 +15,10 @@ What this server guarantees, and what your deployment still has to do.
   [the deviation note](auth-server.md#client-registration-and-consent).
 - A `client_id` that is an HTTPS URL is fetched as a Client ID Metadata
   Document. The fetch does not follow redirects, rejects credentialed URLs and
-  non-loopback IP literals, and does not resolve hostnames, so a name that
-  points at a private address is not blocked. Dynamic registration still works.
+  non-loopback IP literals. Its transport also resolves and checks every address
+  at dial time, rejecting private, link-local and other blocked ranges, including
+  mixed public/private DNS answers. Local-development mode permits loopback
+  addresses for tests. Dynamic registration still works.
 - Registration failures and an `/authorize` for an unknown `client_id` are
   audit events. Redirect URIs are logged; tokens, secrets, codes, keys, and
   assertions are not.
@@ -43,8 +45,14 @@ What this server guarantees, and what your deployment still has to do.
   so it is refused by any other resource server.
 - Refresh tokens are opaque, hashed at rest, rotated on use, and the whole
   family is revoked on reuse.
-- Verifiers are RS256-only, refresh JWKS on a bounded schedule, and validate
-  `iss`, `aud`, `exp`, `nbf`, `sub`, and required scopes.
+- The direct SDK verifiers default to RS256, refresh JWKS on a bounded schedule,
+  and validate `iss`, `aud`, `exp`, `nbf`, `sub`, and required scopes. Python can
+  explicitly allow RS384/RS512; Go and TypeScript use RS256. The optional FastMCP
+  adapter delegates token verification to FastMCP's verifier.
+- Direct JWT verification is offline: revoking a refresh token does not make an
+  already-issued access token fail before expiry. External credential assertions
+  check the live refresh family on every uncached exchange; see
+  [revocation](external-credentials.md#revocation).
 - Tokens, secrets, codes, keys, and assertions are redacted from audit logs.
   An upstream token-exchange fault is `server_error` (502 or 503) with an audit
   `reason`. `invalid_target` is only an audience the exchanger rejected.
@@ -53,8 +61,10 @@ What this server guarantees, and what your deployment still has to do.
 
 ## Transport
 
-- `MCP_AUTH_REQUIRE_HTTPS` defaults to true and means TLS on this process's
-  listener.
+- `MCP_AUTH_REQUIRE_HTTPS` defaults to true and checks canonical URLs and the
+  request transport. The shipped binary listens over HTTP; this setting does
+  not create a TLS listener. Production uses a trusted HTTPS reverse proxy.
+  An application embedding the handler can provide a TLS listener itself.
 - `X-Forwarded-Proto` is set by the caller, so it is **not** accepted as proof
   of TLS unless `MCP_AUTH_TRUST_PROXY_TLS=true`. That setting is a claim that a
   trusted proxy terminates TLS and is the only route in; a NetworkPolicy,
