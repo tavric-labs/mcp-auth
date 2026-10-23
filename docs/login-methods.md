@@ -70,6 +70,46 @@ Every entry has:
 | `type` | Required. `oidc`, `google`, `github` or `ldap`. |
 | `label` | Button or heading text. Each type has a sensible default. |
 | `subject_prefix` | Prepended to the person's subject. Defaults to `"<id>:"`. See [Subjects](#subjects-from-different-methods-never-collide). |
+| `resources` | Optional array of exact MCP resource URLs. Explicit assignments override the unscoped default methods for those resources. |
+
+## Require a login method for one resource
+
+Use `resources` when a service must validate its own upstream credentials
+before an MCP client receives an authorization code or access token:
+
+```json
+{"methods": [
+  {"id":"company", "type":"oidc", "connector":"keycloak", "subject_prefix":""},
+  {"id":"upstream-demo", "type":"oidc", "connector":"credential-gateway",
+   "resources":["https://mcp.example/credential-demo/mcp"]}
+]}
+```
+
+For `credential-demo`, only `upstream-demo` is eligible. The company login
+remains the default for other resources. If multiple methods explicitly name
+the same resource, the user can choose among those methods. With no matching
+assignment and no unscoped default, authorization fails closed.
+
+Assignments use exact URL equality, with no wildcard or prefix matching.
+The pending authorization's stored resource controls method selection on
+submission and callback; editing the picker URL or posting directly to a
+default method cannot bypass the requirement. An assigned single redirect
+method goes directly to its provider after consent.
+
+In the credential-gateway pattern, that provider's login page collects the
+saved service Login through the user's password manager and validates it with
+the fixed upstream service. The gateway retains the upstream header values
+and returns an opaque identity to `mcp-auth`. Only after that provider succeeds
+does `mcp-auth` issue the MCP authorization code and token. The resource server
+validates the MCP token and supplies its retained headers on later requests.
+Neither credential values nor vault references belong in this methods file or
+the MCP client's header configuration. The gateway owns credential custody,
+upstream validation, expiry and header injection; this resource assignment is
+the broker's login-routing policy, not a credential vault.
+
+Keep subject prefixes disjoint, including when methods serve different
+resources. Use an explicit empty prefix on a migrated existing method only
+when its subjects must remain unchanged.
 
 One method that redirects (for example only Google) skips the picker and goes
 straight to the provider. Two or more, or any LDAP method, show the login

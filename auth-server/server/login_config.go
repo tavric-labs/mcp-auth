@@ -25,9 +25,10 @@ type loginMethodsDocument struct {
 
 // loginCommon is shared by every type.
 type loginCommon struct {
-	ID    string `json:"id"`
-	Type  string `json:"type"`
-	Label string `json:"label"`
+	ID        string   `json:"id"`
+	Type      string   `json:"type"`
+	Label     string   `json:"label"`
+	Resources []string `json:"resources"`
 	// SubjectPrefix overrides the "<id>:" default. An explicit empty string
 	// keeps the provider's own subject, for migrating from a single connector
 	// whose subjects must not change.
@@ -188,7 +189,7 @@ func ParseLoginMethods(data []byte, options LoginMethodsOptions) (*LoginRegistry
 		if common.SubjectPrefix != nil {
 			prefix = *common.SubjectPrefix
 		}
-		entries = append(entries, LoginEntry{Method: method, SubjectPrefix: prefix})
+		entries = append(entries, LoginEntry{Method: method, SubjectPrefix: prefix, Resources: common.Resources})
 	}
 	return NewLoginRegistry(entries...)
 }
