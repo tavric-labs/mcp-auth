@@ -1,0 +1,86 @@
+name: Docs version
+
+# Freezes the docs for a release at /docs/<tag>/. The page content comes from
+# the tag; the site design and build configuration come from main, so old tags
+# need no site setup of their own.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, for example v0.6.0
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mcp-auth-docs-production
+  cancel-in-progress: false
+
+jobs:
+  version:
+    if: vars.DOCS_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: docs-production
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      DEPLOY_HOST: ${{ vars.DOCS_DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.DOCS_DEPLOY_USER }}
+      DEPLOY_PORT: ${{ vars.DOCS_DEPLOY_PORT }}
+    steps:
+      - name: Validate tag
+        run: |
+          case "$TAG" in v[0-9]*) ;; *) echo "not a version tag: $TAG" >&2; exit 1;; esac
+          printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$' || { echo "bad tag: $TAG" >&2; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: site
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          path: src
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - name: Build the versioned site
+        working-directory: site
+        env:
+          DOCS_BASE: /docs/${{ env.TAG }}/
+          DOCS_VERSION: ${{ env.TAG }}
+          DOCS_REF: ${{ env.TAG }}
+        run: |
+          npm ci
+          node scripts/docs-version-overlay.mjs ../src/docs docs
+          npm run docs:build
+          tar -czf "$RUNNER_TEMP/docs-version.tgz" -C docs/.vitepress/dist .
+      - name: Configure deployment identity
+        env:
+          DEPLOY_KEY: ${{ secrets.DOCS_DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DOCS_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          test -n "$DEPLOY_HOST" && test -n "$DEPLOY_USER" && test -n "$DEPLOY_PORT"
+          test -n "$DEPLOY_KEY" && test -n "$DEPLOY_KNOWN_HOSTS"
+          install -d -m 700 "$HOME/.ssh"
+          umask 077
+          printf '%s\n' "$DEPLOY_KEY" > "$HOME/.ssh/docs-deploy"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+      - name: Publish version
+        run: |
+          ssh -i "$HOME/.ssh/docs-deploy" -p "$DEPLOY_PORT" -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 \
+            "$DEPLOY_USER@$DEPLOY_HOST" "publish-version $TAG" < "$RUNNER_TEMP/docs-version.tgz"
+      - name: Verify public HTTPS deployment
+        run: |
+          curl --fail --silent --show-error --retry 12 --retry-delay 5 --retry-all-errors --max-time 20 \
+            "https://mcp-auth.tavric-labs.net/docs/$TAG/" -o /dev/null
+          curl --fail --silent --show-error --max-time 20 https://mcp-auth.tavric-labs.net/docs/versions.json |
+            TAG="$TAG" python3 -c 'import json,os,sys; assert os.environ["TAG"] in json.load(sys.stdin)'
+      - name: Remove temporary credentials
+        if: always()
+        run: rm -f "$HOME/.ssh/docs-deploy"
