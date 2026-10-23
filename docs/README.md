@@ -23,7 +23,8 @@ The [SDK guide](auth-client.md) covers Python, Go and TypeScript token validatio
 resource metadata, bearer challenges and token exchange. Read the
 [security model](security-model.md) before deciding which audiences and scopes
 your server accepts. Use [External credentials](external-credentials.md) when
-integrating a credential source.
+integrating a credential source. For a bundled proxy with 1Password support,
+use [Optional credential gateway](credential-gateway.md).
 
 ## Run an example
 

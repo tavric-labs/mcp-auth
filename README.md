@@ -81,6 +81,18 @@ The token sent by the MCP client is valid only for the MCP resource server. It i
 never forwarded to the downstream API; the resource server obtains a separate
 downstream credential through token exchange or the connector's upstream session.
 
+## Optional credential gateway
+
+For header-authenticated upstream MCP servers, the optional
+[combined service](docs/credential-gateway.md) includes OAuth and a credential
+proxy in one deployment. It resolves approved per-user vault references,
+validates the upstream credentials before issuing a new authorization code,
+and supplies headers on later MCP calls. 1Password service-account and local
+desktop modes are included. OAuth-only installations keep the existing binary;
+the authorization-server module and SDKs have no vault dependency.
+
+This bundle is a source-build feature pending review and release.
+
 ## Try it
 
 ```bash

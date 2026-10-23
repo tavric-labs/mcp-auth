@@ -16,14 +16,21 @@ import (
 	"time"
 )
 
+// ResourceAuthorizationCheck is an optional deployment check after identity
+// verification and before any authorization code is issued. Implementations must
+// use only the supplied verified subject and stored resource, and return redacted
+// errors. The core neither knows nor stores upstream credentials.
+type ResourceAuthorizationCheck func(context.Context, string, string) error
+
 type Server struct {
-	Config           Config
-	Store            Store
-	Keys             *KeyManager
-	KeyProvider      KeyProvider
-	IdentityProvider IdentityProvider
-	TokenExchanger   TokenExchanger
-	Audit            *AuditLogger
+	ResourceAuthorizationCheck ResourceAuthorizationCheck
+	Config                     Config
+	Store                      Store
+	Keys                       *KeyManager
+	KeyProvider                KeyProvider
+	IdentityProvider           IdentityProvider
+	TokenExchanger             TokenExchanger
+	Audit                      *AuditLogger
 	// ExternalCredentials maps a resource URL to its external credential
 	// connector. Exchanges from that resource's client take the
 	// credential-assertion path instead of TokenExchanger.
@@ -373,6 +380,13 @@ func (s *Server) identityCallback(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) completeAuthorization(w http.ResponseWriter, r *http.Request, pending ConsentRequest, identity Identity) {
 	request := pending.Request
+	if s.ResourceAuthorizationCheck != nil {
+		if err := s.ResourceAuthorizationCheck(r.Context(), request.Resource, identity.Subject); err != nil {
+			s.Audit.Event("resource_authorization_check", "denied", map[string]any{"client_id": request.ClientID, "resource": request.Resource})
+			redirectError(w, r, request, "access_denied", "upstream credential validation failed", s.Config.Issuer, s.Config.AuthorizationResponseIssuer)
+			return
+		}
+	}
 	if identity.UpstreamSession != nil {
 		if err := s.Store.SaveUpstreamSession(identity.Subject, *identity.UpstreamSession); err != nil {
 			oauthError(w, http.StatusInternalServerError, "server_error")

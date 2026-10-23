@@ -315,3 +315,15 @@ A method implements one of two small interfaces in
 Register it in `ParseLoginMethods` with a config type, the same way `ldap`
 does in `login_config.go`. The registry handles the page, the state, subject
 prefixing, throttling and audit.
+
+### Optional pre-authorization check
+
+Embedders may set `Server.ResourceAuthorizationCheck` before serving requests.
+The callback receives the verified, qualified subject and the stored OAuth
+resource after any login method succeeds, before upstream-session storage or
+code issuance. An error denies authorization without exposing the callback's
+error text. It runs for credential methods, redirect callbacks, and the single
+connector path. Refresh continues the existing session; per-request revocation
+checks remain the resource gateway's responsibility. The
+[combined credential gateway](credential-gateway.md) installs this hook for its
+configured resources and leaves other resources unchanged.
