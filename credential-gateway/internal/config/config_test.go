@@ -213,3 +213,30 @@ func TestFormServiceRejectsBadFieldSets(t *testing.T) {
 		}
 	}
 }
+
+func TestFormServiceVaultURL(t *testing.T) {
+	good := []string{"", "https://taranawireless.1password.com/app#/vault", "onepassword://open/i?a=A&v=V&i=I"}
+	for _, link := range good {
+		data, _ := fixture(t, func(raw map[string]any) {
+			formService(raw)
+			service(raw)["vault_url"] = link
+		})
+		cfg, err := Parse(data)
+		if err != nil || cfg.Services[0].VaultURL != link {
+			t.Errorf("rejected or lost %q: %v", link, err)
+		}
+	}
+	for _, link := range []string{"javascript:alert(1)", "http://vault.example.com/", "https:///x", "https://u:p@vault.example.com/", "https://v.example.com/a b", "data:text/html,x"} {
+		data, _ := fixture(t, func(raw map[string]any) {
+			formService(raw)
+			service(raw)["vault_url"] = link
+		})
+		if _, err := Parse(data); err == nil {
+			t.Errorf("accepted %q", link)
+		}
+	}
+	data, _ := fixture(t, func(raw map[string]any) { service(raw)["vault_url"] = "https://vault.example.com/" })
+	if _, err := Parse(data); err == nil {
+		t.Error("vault_url accepted on a vault-source service")
+	}
+}

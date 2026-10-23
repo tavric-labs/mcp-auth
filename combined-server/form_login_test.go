@@ -105,7 +105,7 @@ func formLoginFlow(t *testing.T, registryMode bool) {
 		"session_binding_key_file": sessionFile,
 		"services": []any{map[string]any{
 			"id": "gitlab", "resource_url": resource, "upstream_url": upstream.URL + "/mcp", "validation_url": upstream.URL + "/check",
-			"required_scopes": []string{"tools:read"}, "source": "form",
+			"required_scopes": []string{"tools:read"}, "source": "form", "vault_url": "https://taranawireless.1password.com/app",
 			"form_fields": []any{
 				map[string]any{"name": "username", "label": "GitLab username"},
 				map[string]any{"name": "token", "label": "GitLab personal access token", "secret": true},
@@ -169,6 +169,9 @@ func formLoginFlow(t *testing.T, registryMode bool) {
 			t.Fatal(err)
 		}
 		page = body(resp)
+		if !strings.Contains(page, `href="https://taranawireless.1password.com/app"`) {
+			t.Fatalf("the configured vault link is missing from the sign-in page: %s", page)
+		}
 		if !strings.Contains(page, "GitLab username") || !strings.Contains(page, `type="password"`) {
 			t.Fatalf("expected the two header inputs: %s", page)
 		}

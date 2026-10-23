@@ -69,7 +69,10 @@ type file struct {
 		Headers []headers.Raw `json:"headers"`
 		// Source is "vault" (default: mapped vault references) or "form"
 		// (values the person submits at sign-in, kept in memory).
-		Source     string `json:"source"`
+		Source string `json:"source"`
+		// VaultURL is where a person finds the values the form asks for, such as
+		// a password manager's vault page. Form services only.
+		VaultURL   string `json:"vault_url"`
 		FormFields []struct {
 			Name   string `json:"name"`
 			Label  string `json:"label"`
@@ -111,6 +114,7 @@ type Service struct {
 	Headers        []headers.Spec
 	Source         string
 	FormFields     []FormField
+	VaultURL       string
 }
 
 // Config is the validated configuration.
@@ -321,6 +325,9 @@ func Parse(data []byte) (*Config, error) {
 		var formFields []FormField
 		switch source {
 		case SourceVault:
+			if s.VaultURL != "" {
+				return nil, fmt.Errorf("%s.vault_url is only valid for source %q", here, SourceForm)
+			}
 			if len(s.FormFields) > 0 {
 				return nil, fmt.Errorf("%s.form_fields is only valid for source %q", here, SourceForm)
 			}
@@ -329,6 +336,9 @@ func Parse(data []byte) (*Config, error) {
 			formFields, err = parseFormFields(s.FormFields, specs, here)
 			if err != nil {
 				return nil, err
+			}
+			if err := checkVaultURL(s.VaultURL); err != nil {
+				return nil, fmt.Errorf("%s.vault_url: %w", here, err)
 			}
 		default:
 			return nil, fmt.Errorf("%s.source must be %q or %q", here, SourceVault, SourceForm)
@@ -354,6 +364,7 @@ func Parse(data []byte) (*Config, error) {
 			Headers:        specs,
 			Source:         source,
 			FormFields:     formFields,
+			VaultURL:       s.VaultURL,
 		})
 	}
 	if c.HasVaultServices {
@@ -393,6 +404,22 @@ func (c *Config) RequiredFields() map[string][]string {
 		}
 	}
 	return out
+}
+
+// checkVaultURL accepts an empty value, an https URL, or a onepassword:// app
+// link, without credentials, whitespace or markup characters.
+func checkVaultURL(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || len(raw) > 2048 || u.User != nil || strings.ContainsAny(raw, "\r\n\t \"'<>") {
+		return errors.New("must be a plain https URL or onepassword:// link")
+	}
+	if (u.Scheme == "https" && u.Host != "") || u.Scheme == "onepassword" {
+		return nil
+	}
+	return errors.New("must be a plain https URL or onepassword:// link")
 }
 
 // parseFormFields requires the sign-in inputs to be exactly the credential

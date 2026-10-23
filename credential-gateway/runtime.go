@@ -181,6 +181,8 @@ type FormField struct {
 type FormService struct {
 	ID, ResourceURL string
 	Fields          []FormField
+	// VaultURL, when set, is shown beside the form as where to find the values.
+	VaultURL string
 }
 
 // FormServices lists the form-source services, for the OAuth side to offer a
@@ -191,7 +193,7 @@ func (r *Runtime) FormServices() []FormService {
 		if s.Source != config.SourceForm {
 			continue
 		}
-		service := FormService{ID: s.ID, ResourceURL: s.ResourceURL}
+		service := FormService{ID: s.ID, ResourceURL: s.ResourceURL, VaultURL: s.VaultURL}
 		for _, f := range s.FormFields {
 			service.Fields = append(service.Fields, FormField{Name: f.Name, Label: f.Label, Secret: f.Secret})
 		}

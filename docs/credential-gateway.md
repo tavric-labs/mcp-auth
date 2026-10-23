@@ -249,6 +249,11 @@ run one replica or route a client to the same one. Rejected values are never
 stored. Each header then uses the same transforms and per-request injection as
 vault services.
 
+An optional `vault_url` (an `https` URL, or a `onepassword://` app link) adds an
+"open your vault" link beside the form, in a new tab, so the person can open
+the vault page and copy the values. Nothing is fetched from it; other schemes,
+credentials in the URL and markup characters are refused.
+
 `form_fields` must be exactly the credential fields the headers read. A
 deployment with only form services needs no `provider` or `mappings_file`, and
 setting them is an error.

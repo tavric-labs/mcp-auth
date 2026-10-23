@@ -317,6 +317,7 @@ func (s *Server) renderLogin(w http.ResponseWriter, status int, registry *LoginR
 			Action: s.Config.LoginEndpoint() + "/" + entry.Method.ID(),
 		}
 		if credential, ok := entry.Method.(CredentialLoginMethod); ok {
+			item.LinkLabel, item.LinkHref = safeHelpLink(entry.Method)
 			for _, field := range credential.Fields() {
 				value := ""
 				if !field.Secret && entry.Method.ID() == failedMethod {
@@ -401,6 +402,10 @@ type loginMethodView struct {
 	Label  string
 	Action string
 	Fields []loginFieldView
+	// LinkLabel and LinkHref point at where to find the values asked for. The
+	// href was validated by safeHelpLink, which is what allows its scheme.
+	LinkLabel string
+	LinkHref  template.URL
 }
 
 type loginView struct {
@@ -431,6 +436,8 @@ input[type=text],input[type=password]{width:100%;box-sizing:border-box;padding:.
 button{margin-top:.75rem;width:100%;padding:.6rem;font:inherit;cursor:pointer;border:1px solid GrayText;border-radius:.25rem;background:ButtonFace;color:ButtonText}
 .error{padding:.6rem .75rem;margin:0 0 1rem;border:1px solid #b00020;border-radius:.25rem;color:#b00020}
 p{margin:0}
+.help{margin:0 0 .5rem;font-size:.9rem}
+.help a{color:LinkText}
 </style>
 </head>
 <body>
@@ -446,6 +453,7 @@ p{margin:0}
 <input type="hidden" name="login_id" value="{{$.LoginID}}">
 {{if .Fields}}
 <h2>{{.Label}}</h2>
+{{if .LinkHref}}<p class="help"><a href="{{.LinkHref}}" target="_blank" rel="noopener noreferrer">{{.LinkLabel}}</a></p>{{end}}
 {{range .Fields}}
 <label for="{{$.LoginID}}-{{.Name}}">{{.Label}}</label>
 {{if .Secret}}<input type="password" id="{{$.LoginID}}-{{.Name}}" name="{{.Name}}" autocomplete="current-password" required>

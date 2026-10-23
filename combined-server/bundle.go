@@ -61,14 +61,22 @@ func Attach(auth *server.Server, gateway *credentialgateway.Runtime) error {
 // header value the service needs. It submits to the gateway, which checks the
 // values at the upstream and keeps them in memory under a random subject.
 type formLogin struct {
-	id, label, prefix, service string
-	fields                     []server.LoginField
-	gateway                    *credentialgateway.Runtime
+	id, label, prefix, service, vaultURL string
+	fields                               []server.LoginField
+	gateway                              *credentialgateway.Runtime
 }
 
 func (m *formLogin) ID() string                  { return m.id }
 func (m *formLogin) Label() string               { return m.label }
 func (m *formLogin) Fields() []server.LoginField { return m.fields }
+
+// HelpLink points at the configured vault page, when there is one.
+func (m *formLogin) HelpLink() (string, string) {
+	if m.vaultURL == "" {
+		return "", ""
+	}
+	return "Open your vault to copy these values", m.vaultURL
+}
 
 func (m *formLogin) Authenticate(ctx context.Context, _ server.IdentityRequest, attempt server.LoginAttempt) (server.Identity, error) {
 	subject, err := m.gateway.AuthenticateForm(ctx, m.service, m.prefix, attempt.Values)
@@ -93,7 +101,7 @@ func attachFormLogins(auth *server.Server, gateway *credentialgateway.Runtime) e
 	entries := make([]server.LoginEntry, 0, len(services))
 	for _, service := range services {
 		id := "form-" + service.ID
-		method := &formLogin{id: id, label: "Sign in to " + service.ID, prefix: id + ":", service: service.ID, gateway: gateway}
+		method := &formLogin{id: id, label: "Sign in to " + service.ID, prefix: id + ":", service: service.ID, vaultURL: service.VaultURL, gateway: gateway}
 		for _, field := range service.Fields {
 			method.fields = append(method.fields, server.LoginField{Name: field.Name, Label: field.Label, Secret: field.Secret})
 		}
