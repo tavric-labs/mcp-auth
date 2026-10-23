@@ -15,6 +15,7 @@
 [![Node tested 22 | 24 | 26](https://img.shields.io/badge/Node%20tested-22%20%7C%2024%20%7C%2026-5FA04E?logo=node.js&logoColor=white)](.github/workflows/ci.yml)
 [![TypeScript 5.9](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](auth-client/typescript/package.json)
 [![MCP authorization](https://img.shields.io/badge/MCP-authorization-7C3AED)](docs/architecture.md)
+[![Docs](https://img.shields.io/badge/docs-mcp--auth.tavric--labs.net-7C3AED)](https://mcp-auth.tavric-labs.net/docs/)
 [![GitHub release](https://img.shields.io/github/v/release/tavric-labs/mcp-auth?display_name=tag)](https://github.com/tavric-labs/mcp-auth/releases)
 [![Docker pulls](https://img.shields.io/docker/pulls/princekrroshan01/mcp-auth-server)](https://hub.docker.com/r/princekrroshan01/mcp-auth-server)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -43,7 +44,7 @@ for setup. The provider's upstream protocol is separate from the OAuth 2.1
 flow between the MCP client and mcp-auth.
 
 Maintained by [Tavric Labs](https://github.com/tavric-labs).
-Browse the [documentation](docs/README.md), [releases](https://github.com/tavric-labs/mcp-auth/releases),
+Read the [documentation](https://mcp-auth.tavric-labs.net/docs/) (sources in [docs/](docs/README.md)), browse [releases](https://github.com/tavric-labs/mcp-auth/releases),
 or [report a bug](https://github.com/tavric-labs/mcp-auth/issues). For security
 reports, follow the [security policy](SECURITY.md).
 
