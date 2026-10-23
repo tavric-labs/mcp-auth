@@ -20,3 +20,4 @@ graphify-out/
 # A provider-specific example must never be committed here; tests/test_example.py
 # asserts the repository tracks none of it.
 examples/databricks-mcp/
+docs/.vitepress/cache/
