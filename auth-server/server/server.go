@@ -23,6 +23,11 @@ import (
 type ResourceAuthorizationCheck func(context.Context, string, string) error
 
 type Server struct {
+	// ResourceLogins holds sign-in methods scoped to particular resources when
+	// the identity provider is a single connector rather than a login registry.
+	// A resource with an entry here signs in through it; every other resource
+	// keeps the connector's own flow, downstream token exchange included.
+	ResourceLogins             *LoginRegistry
 	ResourceAuthorizationCheck ResourceAuthorizationCheck
 	Config                     Config
 	Store                      Store
@@ -313,6 +318,10 @@ func (s *Server) finishConsent(w http.ResponseWriter, r *http.Request, consentID
 	}
 	if registry := s.loginRegistry(); registry != nil {
 		s.startLogin(w, r, registry, pending)
+		return
+	}
+	if s.ResourceLogins.servesResource(request.Resource) {
+		s.startLogin(w, r, s.ResourceLogins, pending)
 		return
 	}
 	if interactive, ok := s.IdentityProvider.(InteractiveIdentityProvider); ok {

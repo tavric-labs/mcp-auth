@@ -90,10 +90,6 @@ func attachFormLogins(auth *server.Server, gateway *credentialgateway.Runtime) e
 	if len(services) == 0 {
 		return nil
 	}
-	registry, ok := auth.IdentityProvider.(*server.LoginRegistry)
-	if !ok {
-		return errors.New("form-source services need login methods mode (MCP_AUTH_LOGIN_METHODS_FILE)")
-	}
 	entries := make([]server.LoginEntry, 0, len(services))
 	for _, service := range services {
 		id := "form-" + service.ID
@@ -103,10 +99,22 @@ func attachFormLogins(auth *server.Server, gateway *credentialgateway.Runtime) e
 		}
 		entries = append(entries, server.LoginEntry{Method: method, SubjectPrefix: method.prefix, Resources: []string{service.ResourceURL}})
 	}
-	extended, err := registry.WithEntries(entries...)
-	if err != nil {
-		return fmt.Errorf("form sign-in methods conflict with the login methods: %w", err)
+	if registry, ok := auth.IdentityProvider.(*server.LoginRegistry); ok {
+		// Login methods mode: the form methods join the existing registry.
+		extended, err := registry.WithEntries(entries...)
+		if err != nil {
+			return fmt.Errorf("form sign-in methods conflict with the login methods: %w", err)
+		}
+		auth.IdentityProvider = extended
+		return nil
 	}
-	auth.IdentityProvider = extended
+	// Single connector (or local) mode: leave the identity provider, and its
+	// downstream token exchange, untouched. Only the form resources use the
+	// form methods; every other resource signs in as before.
+	forms, err := server.NewLoginRegistry(entries...)
+	if err != nil {
+		return fmt.Errorf("form sign-in methods are invalid: %w", err)
+	}
+	auth.ResourceLogins = forms
 	return nil
 }

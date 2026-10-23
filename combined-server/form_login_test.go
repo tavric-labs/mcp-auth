@@ -31,7 +31,14 @@ import (
 // page asks for the two header values, the gateway validates them at the
 // upstream before any code is issued, keeps them in memory under a random
 // subject, and sends them on every later request. No vault is configured.
-func TestFormLoginNeedsNoIdentityProviderOrVault(t *testing.T) {
+func TestFormLoginNeedsNoIdentityProviderOrVault(t *testing.T) { formLoginFlow(t, true) }
+
+// TestFormLoginCoexistsWithASingleConnector keeps the deployment's identity
+// provider, and everything that depends on it such as downstream token
+// exchange, in charge of every resource except the form resource.
+func TestFormLoginCoexistsWithASingleConnector(t *testing.T) { formLoginFlow(t, false) }
+
+func formLoginFlow(t *testing.T, registryMode bool) {
 	var operations atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-GitLab-Username") != "alice" || r.Header.Get("X-GitLab-PAT-Token") != "glpat-fixture" {
@@ -54,17 +61,23 @@ func TestFormLoginNeedsNoIdentityProviderOrVault(t *testing.T) {
 	authHTTP := httptest.NewUnstartedServer(nil)
 	issuer := "http://" + authHTTP.Listener.Addr().String()
 	resource := "https://mcp.example.test/gitlab/mcp"
-	// The deployment's existing login, scoped to some other resource.
-	company, err := server.NewStaticLoginMethod("company", "Company login", "someone")
-	if err != nil {
-		t.Fatal(err)
+	other := "https://mcp.example.test/other/mcp"
+	// The deployment's existing identity provider: a login registry whose
+	// company method serves another resource, or a single connector.
+	var identity server.IdentityProvider = server.LocalIdentityProvider{Subject: "alice"}
+	if registryMode {
+		company, err := server.NewStaticLoginMethod("company", "Company login", "someone")
+		if err != nil {
+			t.Fatal(err)
+		}
+		registry, err := server.NewLoginRegistry(server.LoginEntry{Method: company, SubjectPrefix: "company:", Resources: []string{other}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		identity = registry
 	}
-	registry, err := server.NewLoginRegistry(server.LoginEntry{Method: company, SubjectPrefix: "company:", Resources: []string{"https://mcp.example.test/other/mcp"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := server.Config{Issuer: issuer, Resources: []string{resource}, AllowedScopes: []string{"tools:read"}, LocalDevelopment: true, AccessTokenTTL: time.Minute, RefreshTokenTTL: time.Hour, AuthorizationCodeTTL: time.Minute, LogLevel: "silent"}
-	auth, err := server.NewServer(cfg, server.NewMemoryStore(), registry, nil, io.Discard)
+	cfg := server.Config{Issuer: issuer, Resources: []string{resource, other}, AllowedScopes: []string{"tools:read"}, LocalDevelopment: true, AccessTokenTTL: time.Minute, RefreshTokenTTL: time.Hour, AuthorizationCodeTTL: time.Minute, LogLevel: "silent"}
+	auth, err := server.NewServer(cfg, server.NewMemoryStore(), identity, nil, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,6 +218,21 @@ func TestFormLoginNeedsNoIdentityProviderOrVault(t *testing.T) {
 	call.Body.Close()
 	if call.StatusCode != 200 || operations.Load() != 1 {
 		t.Fatalf("bearer was not exchanged for the vault headers: status %d, upstream calls %d", call.StatusCode, operations.Load())
+	}
+	if !registryMode {
+		// Another resource still signs in through the connector, not the form.
+		jar, _ := cookiejar.New(nil)
+		browser := &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		q := url.Values{"response_type": {"code"}, "client_id": {"client"}, "redirect_uri": {"http://127.0.0.1:39001/callback"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(digest[:])}, "code_challenge_method": {"S256"}, "resource": {other}, "scope": {"tools:read"}, "state": {"st"}, "approve": {"true"}}
+		resp, err := browser.Get(issuer + "/authorize?" + q.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		location, err := resp.Location()
+		if err != nil || location.Query().Get("code") == "" {
+			t.Fatalf("another resource no longer signs in through the connector: %v %v", resp.StatusCode, err)
+		}
 	}
 	anon, _ := http.Post(gateHTTP.URL+"/gitlab/mcp", "application/json", strings.NewReader(`{}`))
 	anon.Body.Close()

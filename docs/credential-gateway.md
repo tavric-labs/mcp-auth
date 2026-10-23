@@ -251,7 +251,11 @@ vault services.
 
 `form_fields` must be exactly the credential fields the headers read. A
 deployment with only form services needs no `provider` or `mappings_file`, and
-setting them is an error. A form service needs login methods mode
-(`MCP_AUTH_LOGIN_METHODS_FILE`): the gateway adds a sign-in method `form-<id>`
-scoped to the service's resource, and the existing methods keep serving every
-other resource.
+setting them is an error.
+
+The gateway adds a sign-in method `form-<id>` scoped to the service's resource.
+With a single identity connector (`MCP_AUTH_CONNECTOR`), the connector keeps
+serving every other resource unchanged, including downstream token exchange;
+only the form resource uses the form. With login methods mode
+(`MCP_AUTH_LOGIN_METHODS_FILE`), the form methods join the registry and the
+existing methods keep serving their resources.

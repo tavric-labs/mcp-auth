@@ -27,6 +27,16 @@ func (s *Server) loginRegistry() *LoginRegistry {
 	return registry
 }
 
+// loginFlowRegistry is the registry the sign-in page and submission use: the
+// login registry when that is the identity provider, otherwise the registry of
+// resource-scoped methods. The connector callback never uses the latter.
+func (s *Server) loginFlowRegistry() *LoginRegistry {
+	if registry := s.loginRegistry(); registry != nil {
+		return registry
+	}
+	return s.ResourceLogins
+}
+
 // loginRecordKey namespaces a login page id in the store. Consent ids, login
 // ids and upstream states share one table, and an id from one stage must never
 // be accepted at another: a consent id from /authorize, used as a login id,
@@ -160,7 +170,7 @@ func (s *Server) beginRedirectLogin(w http.ResponseWriter, r *http.Request, entr
 // without consuming it, so an expired or unbound id is only reported when a
 // method is chosen.
 func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
-	registry := s.loginRegistry()
+	registry := s.loginFlowRegistry()
 	if registry == nil {
 		http.NotFound(w, r)
 		return
@@ -178,7 +188,7 @@ func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
 // loginSubmit handles a chosen method: it starts the provider redirect, or
 // checks the submitted credentials.
 func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
-	registry := s.loginRegistry()
+	registry := s.loginFlowRegistry()
 	if registry == nil {
 		http.NotFound(w, r)
 		return

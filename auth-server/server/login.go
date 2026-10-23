@@ -226,6 +226,22 @@ func (r *LoginRegistry) entriesForResource(resource string) []LoginEntry {
 	return defaults
 }
 
+// servesResource reports whether a method is explicitly assigned to resource.
+// It is nil-safe, so a server with no resource logins answers false.
+func (r *LoginRegistry) servesResource(resource string) bool {
+	if r == nil {
+		return false
+	}
+	for _, entry := range r.entries {
+		for _, allowed := range entry.Resources {
+			if allowed == resource {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (r *LoginRegistry) lookupForResource(id, resource string) (LoginEntry, bool) {
 	for _, entry := range r.entriesForResource(resource) {
 		if entry.Method.ID() == id {
