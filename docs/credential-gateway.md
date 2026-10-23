@@ -45,7 +45,9 @@ docker build -f combined-server/Dockerfile -t mcp-auth-combined:review .
 
 1. The client discovers the resource, requests consent, and authenticates through
    the configured identity connector or login method. This establishes the
-   stable, verified human subject used by private mappings.
+   stable, verified human subject used by private mappings. For one shared
+   service credential, a resource-scoped [`static` login method](login-methods.md)
+   needs no identity provider; its fixed subject keys the mapping.
 2. Before issuing the authorization code, the bundle resolves that subject's
    approved mapping for the requested resource. It reads current vault values,
    renders only configured headers, and calls the service's `validation_url`.

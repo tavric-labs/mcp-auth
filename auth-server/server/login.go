@@ -157,7 +157,7 @@ func NewLoginRegistry(entries ...LoginEntry) (*LoginRegistry, error) {
 			return nil, fmt.Errorf("login method %q cannot be both redirect and credential", id)
 		case !redirect && !isCredential:
 			return nil, fmt.Errorf("login method %q is neither a redirect nor a credential method", id)
-		case isCredential && len(credential.Fields()) == 0:
+		case isCredential && len(credential.Fields()) == 0 && !allowsNoFields(entry.Method):
 			return nil, fmt.Errorf("login method %q has no form fields", id)
 		}
 		registry.byID[id] = entry
@@ -396,4 +396,11 @@ func (t loginTicket) abandon() {
 	if len(t.limiter.attempts[t.key]) == 0 {
 		delete(t.limiter.attempts, t.key)
 	}
+}
+
+// allowsNoFields reports whether a credential method may show a button instead
+// of inputs. Only methods that decide without person-supplied values opt in.
+func allowsNoFields(method LoginMethod) bool {
+	opt, ok := method.(interface{ AllowsNoFields() bool })
+	return ok && opt.AllowsNoFields()
 }

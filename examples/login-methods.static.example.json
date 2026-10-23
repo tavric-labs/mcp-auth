@@ -1,0 +1,16 @@
+{
+  "methods": [
+    {
+      "id": "company",
+      "type": "oidc",
+      "connector": "keycloak",
+      "subject_prefix": ""
+    },
+    {
+      "id": "vault",
+      "type": "static",
+      "subject": "gitlab-shared",
+      "resources": ["https://mcp.example.com/gitlab/mcp"]
+    }
+  ]
+}
