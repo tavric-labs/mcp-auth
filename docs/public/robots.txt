@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://mcp-auth.tavric-labs.net/docs/sitemap.xml
