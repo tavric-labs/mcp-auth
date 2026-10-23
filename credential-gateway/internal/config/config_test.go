@@ -148,3 +148,68 @@ func TestConflictingGatewayPathsFailStartup(t *testing.T) {
 		t.Fatal("ambiguous path accepted")
 	}
 }
+
+func formService(raw map[string]any) {
+	delete(raw, "provider")
+	delete(raw, "mappings_file")
+	s := service(raw)
+	s["source"] = "form"
+	s["form_fields"] = []any{
+		map[string]any{"name": "username", "label": "GitLab username"},
+		map[string]any{"name": "api_token", "secret": true},
+	}
+}
+
+func TestFormServiceNeedsNoProviderOrMappings(t *testing.T) {
+	data, _ := fixture(t, formService)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := cfg.Services[0]
+	if cfg.HasVaultServices || s.Source != SourceForm || len(s.FormFields) != 2 || s.FormFields[1].Label != "api_token" || !s.FormFields[1].Secret {
+		t.Fatalf("form service parsed wrongly: %+v", s)
+	}
+	if cfg.FormTTL.Seconds() != 3600 || cfg.FormMaxEntries != 1024 {
+		t.Fatalf("form defaults: %v %d", cfg.FormTTL, cfg.FormMaxEntries)
+	}
+	if len(cfg.RequiredFields()) != 0 {
+		t.Fatal("a form service must not be validated against mappings")
+	}
+}
+
+func TestFormServiceRejectsBadFieldSets(t *testing.T) {
+	cases := map[string]func(map[string]any){
+		"missing a header field": func(raw map[string]any) {
+			formService(raw)
+			service(raw)["form_fields"] = []any{map[string]any{"name": "username"}}
+		},
+		"field no header reads": func(raw map[string]any) {
+			formService(raw)
+			service(raw)["form_fields"] = append(service(raw)["form_fields"].([]any), map[string]any{"name": "extra"})
+		},
+		"duplicate field": func(raw map[string]any) {
+			formService(raw)
+			service(raw)["form_fields"] = []any{map[string]any{"name": "username"}, map[string]any{"name": "username"}, map[string]any{"name": "api_token"}}
+		},
+		"no fields": func(raw map[string]any) { formService(raw); delete(service(raw), "form_fields") },
+		"multiline label": func(raw map[string]any) {
+			formService(raw)
+			service(raw)["form_fields"].([]any)[0].(map[string]any)["label"] = "a\nb"
+		},
+		"unknown source":  func(raw map[string]any) { service(raw)["source"] = "typed" },
+		"fields on vault": func(raw map[string]any) { service(raw)["form_fields"] = []any{map[string]any{"name": "username"}} },
+		"form with provider kept": func(raw map[string]any) {
+			formService(raw)
+			raw["mappings_file"] = "/x/mappings.json"
+		},
+		"vault without provider": func(raw map[string]any) { delete(raw, "provider") },
+		"short form ttl":         func(raw map[string]any) { formService(raw); raw["form_credentials"] = map[string]any{"ttl_seconds": 5} },
+	}
+	for name, mutate := range cases {
+		data, _ := fixture(t, mutate)
+		if _, err := Parse(data); err == nil {
+			t.Errorf("accepted: %s", name)
+		}
+	}
+}

@@ -46,6 +46,10 @@ type file struct {
 		TTLSeconds *float64 `json:"ttl_seconds"`
 		MaxEntries int      `json:"max_entries"`
 	} `json:"credential_cache"`
+	FormCredentials struct {
+		TTLSeconds float64 `json:"ttl_seconds"`
+		MaxEntries int     `json:"max_entries"`
+	} `json:"form_credentials"`
 	Limits struct {
 		MaxRequestBytes            int64   `json:"max_request_bytes"`
 		UpstreamConnectTimeoutSecs float64 `json:"upstream_connect_timeout_seconds"`
@@ -63,6 +67,14 @@ type file struct {
 			PrivateKeyFile string `json:"private_key_file"`
 		} `json:"resource_client"`
 		Headers []headers.Raw `json:"headers"`
+		// Source is "vault" (default: mapped vault references) or "form"
+		// (values the person submits at sign-in, kept in memory).
+		Source     string `json:"source"`
+		FormFields []struct {
+			Name   string `json:"name"`
+			Label  string `json:"label"`
+			Secret bool   `json:"secret"`
+		} `json:"form_fields"`
 	} `json:"services"`
 }
 
@@ -71,6 +83,20 @@ type ResourceClient struct {
 	ClientID   string
 	KeyID      string
 	PrivateKey *rsa.PrivateKey
+}
+
+// Credential sources for a service.
+const (
+	SourceVault = "vault"
+	SourceForm  = "form"
+)
+
+var formFieldRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
+
+// FormField is one input on a form-source service's sign-in page.
+type FormField struct {
+	Name, Label string
+	Secret      bool
 }
 
 // Service is one proxied MCP backend.
@@ -83,6 +109,8 @@ type Service struct {
 	RequiredScopes []string
 	Client         ResourceClient
 	Headers        []headers.Spec
+	Source         string
+	FormFields     []FormField
 }
 
 // Config is the validated configuration.
@@ -104,6 +132,11 @@ type Config struct {
 	ConnectTimeout        time.Duration
 	ResponseHeaderTimeout time.Duration
 	Services              []Service
+	// HasVaultServices is true when any service reads mapped vault references,
+	// which is what requires a provider and a mappings file.
+	HasVaultServices bool
+	FormTTL          time.Duration
+	FormMaxEntries   int
 }
 
 // Load reads and validates the configuration file at path.
@@ -180,9 +213,6 @@ func Parse(data []byte) (*Config, error) {
 		return nil, errors.New("session binding key must be at least 32 characters")
 	}
 	c.SessionKey = []byte(key)
-	if c.MappingsFile == "" || c.ProviderType == "" || len(c.ProviderOptions) == 0 {
-		return nil, errors.New("mappings_file and provider.type/options are required")
-	}
 
 	ttl := 300.0
 	if f.CredentialCache.TTLSeconds != nil {
@@ -190,6 +220,16 @@ func Parse(data []byte) (*Config, error) {
 	}
 	if ttl < 0 || ttl > 3600 {
 		return nil, errors.New("credential_cache.ttl_seconds must be between 0 and 3600")
+	}
+	if c.FormTTL, err = seconds(f.FormCredentials.TTLSeconds, 3600, 60, 86400, "form_credentials.ttl_seconds"); err != nil {
+		return nil, err
+	}
+	c.FormMaxEntries = f.FormCredentials.MaxEntries
+	if c.FormMaxEntries == 0 {
+		c.FormMaxEntries = 1024
+	}
+	if c.FormMaxEntries < 1 || c.FormMaxEntries > 100000 {
+		return nil, errors.New("form_credentials.max_entries must be between 1 and 100000")
 	}
 	c.CacheTTL = time.Duration(ttl * float64(time.Second))
 	c.CacheMaxEntries = f.CredentialCache.MaxEntries
@@ -274,6 +314,25 @@ func Parse(data []byte) (*Config, error) {
 		if err != nil {
 			return nil, err
 		}
+		source := s.Source
+		if source == "" {
+			source = SourceVault
+		}
+		var formFields []FormField
+		switch source {
+		case SourceVault:
+			if len(s.FormFields) > 0 {
+				return nil, fmt.Errorf("%s.form_fields is only valid for source %q", here, SourceForm)
+			}
+			c.HasVaultServices = true
+		case SourceForm:
+			formFields, err = parseFormFields(s.FormFields, specs, here)
+			if err != nil {
+				return nil, err
+			}
+		default:
+			return nil, fmt.Errorf("%s.source must be %q or %q", here, SourceVault, SourceForm)
+		}
 		path := strings.TrimRight(resource.Path, "/")
 		if path == "" {
 			path = "/"
@@ -293,7 +352,16 @@ func Parse(data []byte) (*Config, error) {
 			RequiredScopes: s.RequiredScopes,
 			Client:         ResourceClient{ClientID: s.ResourceClient.ClientID, KeyID: s.ResourceClient.KeyID, PrivateKey: priv},
 			Headers:        specs,
+			Source:         source,
+			FormFields:     formFields,
 		})
+	}
+	if c.HasVaultServices {
+		if c.MappingsFile == "" || c.ProviderType == "" || len(c.ProviderOptions) == 0 {
+			return nil, errors.New("mappings_file and provider.type/options are required for vault services")
+		}
+	} else if c.MappingsFile != "" || c.ProviderType != "" || len(c.ProviderOptions) != 0 {
+		return nil, errors.New("mappings_file and provider are only valid when a service uses the vault source")
 	}
 	return c, nil
 }
@@ -315,11 +383,52 @@ func parseRSAKey(text string) (*rsa.PrivateKey, error) {
 	return nil, errors.New("private key is not a valid RSA key")
 }
 
-// RequiredFields maps each service id to the credential fields its headers read.
+// RequiredFields maps each vault service id to the credential fields its
+// headers read. Form services have no mapping to validate.
 func (c *Config) RequiredFields() map[string][]string {
 	out := make(map[string][]string, len(c.Services))
 	for _, s := range c.Services {
-		out[s.ID] = headers.RequiredFields(s.Headers)
+		if s.Source == SourceVault {
+			out[s.ID] = headers.RequiredFields(s.Headers)
+		}
 	}
 	return out
+}
+
+// parseFormFields requires the sign-in inputs to be exactly the credential
+// fields the service's headers read, so a form can neither omit a value a
+// header needs nor collect one nothing uses.
+func parseFormFields(raw []struct {
+	Name   string `json:"name"`
+	Label  string `json:"label"`
+	Secret bool   `json:"secret"`
+}, specs []headers.Spec, where string) ([]FormField, error) {
+	if len(raw) == 0 || len(raw) > 16 {
+		return nil, fmt.Errorf("%s.form_fields must list 1 to 16 inputs for source %q", where, SourceForm)
+	}
+	want := map[string]bool{}
+	for _, name := range headers.RequiredFields(specs) {
+		want[name] = true
+	}
+	seen := map[string]bool{}
+	out := make([]FormField, 0, len(raw))
+	for i, field := range raw {
+		here := fmt.Sprintf("%s.form_fields[%d]", where, i)
+		if !formFieldRe.MatchString(field.Name) || seen[field.Name] || !want[field.Name] {
+			return nil, fmt.Errorf("%s: name must be a unique credential field that a header reads", here)
+		}
+		label := strings.TrimSpace(field.Label)
+		if label == "" {
+			label = field.Name
+		}
+		if len(label) > 80 || strings.ContainsAny(label, "\r\n\x00") {
+			return nil, fmt.Errorf("%s: label must be at most 80 characters on one line", here)
+		}
+		seen[field.Name] = true
+		out = append(out, FormField{Name: field.Name, Label: label, Secret: field.Secret})
+	}
+	if len(seen) != len(want) {
+		return nil, fmt.Errorf("%s.form_fields must cover every credential field the headers read", where)
+	}
+	return out, nil
 }

@@ -204,3 +204,54 @@ mapping/configuration files and the same session-binding key to accept bound
 MCP sessions across replicas. The OAuth store must meet its existing deployment
 requirements. Restrict the upstream route to trusted gateway callers where the
 network permits; it remains authenticated with its required headers.
+
+## Sign-in form source (no vault, no identity provider)
+
+A service can take its header values from the person at sign-in instead of
+from mapped vault references. Set `"source": "form"` and list one input per
+credential field the headers read:
+
+```json
+{
+  "services": [{
+    "id": "gitlab",
+    "resource_url": "https://auth.example.com/gitlab/mcp",
+    "upstream_url": "https://gitlab.example.com/api/v4/mcp_server",
+    "validation_url": "https://gitlab.example.com/auth/check",
+    "required_scopes": ["tools:read"],
+    "resource_client": {"client_id": "gitlab-gateway", "key_id": "k1", "private_key_file": "/etc/mcp-auth-gateway/client.pem"},
+    "source": "form",
+    "form_fields": [
+      {"name": "username", "label": "GitLab username"},
+      {"name": "api_token", "label": "Personal access token", "secret": true}
+    ],
+    "headers": [
+      {"name": "X-GitLab-Username", "type": "direct", "field": "username"},
+      {"name": "X-GitLab-PAT-Token", "type": "direct", "field": "api_token"}
+    ]
+  }]
+}
+```
+
+The MCP client's configuration is the resource URL alone. Its OAuth flow shows
+a sign-in page for this resource only, with those inputs. A browser password
+manager, such as the 1Password extension, can fill them. The gateway sends the
+values to `validation_url`; only a 2xx response issues the authorization code.
+A refused sign-in shows the form again, throttled per account name; an
+unreachable upstream shows a temporary-failure message.
+
+Accepted values are held **in process memory only**, under a random per-sign-in
+subject, for `form_credentials.ttl_seconds` (default 3600, 60 to 86400) and at
+most `form_credentials.max_entries` entries (default 1024; the oldest are
+evicted first). They are never logged, never returned to the client, and lost
+on restart, so people sign in again. They are not shared between replicas, so
+run one replica or route a client to the same one. Rejected values are never
+stored. Each header then uses the same transforms and per-request injection as
+vault services.
+
+`form_fields` must be exactly the credential fields the headers read. A
+deployment with only form services needs no `provider` or `mappings_file`, and
+setting them is an error. A form service needs login methods mode
+(`MCP_AUTH_LOGIN_METHODS_FILE`): the gateway adds a sign-in method `form-<id>`
+scoped to the service's resource, and the existing methods keep serving every
+other resource.

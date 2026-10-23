@@ -404,3 +404,12 @@ func allowsNoFields(method LoginMethod) bool {
 	opt, ok := method.(interface{ AllowsNoFields() bool })
 	return ok && opt.AllowsNoFields()
 }
+
+// WithEntries returns a registry holding this one's methods followed by
+// entries, validated together so ids, prefixes and resource assignments cannot
+// collide. A deployment that adds methods after startup, such as a gateway's
+// per-resource sign-in forms, installs the result as the identity provider.
+func (r *LoginRegistry) WithEntries(entries ...LoginEntry) (*LoginRegistry, error) {
+	combined := append(append([]LoginEntry(nil), r.entries...), entries...)
+	return NewLoginRegistry(combined...)
+}
