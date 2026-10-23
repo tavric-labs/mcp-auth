@@ -1,5 +1,7 @@
 import DefaultTheme from 'vitepress/theme'
-import { onMounted, onUnmounted } from 'vue'
+import { h, onMounted, onUnmounted } from 'vue'
+import VersionBanner from './VersionBanner.vue'
+import VersionSwitcher from './VersionSwitcher.vue'
 import './custom.css'
 
 // Click a rendered Mermaid diagram to view it at natural size.
@@ -25,6 +27,11 @@ function openDiagram(svg) {
 
 export default {
   extends: DefaultTheme,
+  Layout: () =>
+    h(DefaultTheme.Layout, null, {
+      'nav-bar-content-after': () => h(VersionSwitcher),
+      'doc-before': () => h(VersionBanner)
+    }),
   setup() {
     const onClick = (e) => {
       const target = e.target instanceof Element ? e.target.closest('.mermaid') : null

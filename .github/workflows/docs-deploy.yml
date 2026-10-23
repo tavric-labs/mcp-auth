@@ -8,6 +8,7 @@ on:
       - 'package.json'
       - 'package-lock.json'
       - 'deploy/docs/**'
+      - 'scripts/docs-version-overlay.mjs'
       - '.github/workflows/docs-deploy.yml'
   pull_request:
     paths:
@@ -15,6 +16,7 @@ on:
       - 'package.json'
       - 'package-lock.json'
       - 'deploy/docs/**'
+      - 'scripts/docs-version-overlay.mjs'
       - '.github/workflows/docs-deploy.yml'
   workflow_dispatch:
 
