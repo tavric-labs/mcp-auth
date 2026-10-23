@@ -243,14 +243,6 @@ func (r *LoginRegistry) singleForResource(resource string) (LoginEntry, bool) {
 	return entries[0], true
 }
 
-// single returns the only method when exactly one is registered.
-func (r *LoginRegistry) single() (LoginEntry, bool) {
-	if len(r.entries) != 1 {
-		return LoginEntry{}, false
-	}
-	return r.entries[0], true
-}
-
 // qualify namespaces the identity a method returned. Upstream tokens are not
 // kept: registry mode has no downstream strategy that would use them, so
 // storing them would only widen what a database leak exposes.

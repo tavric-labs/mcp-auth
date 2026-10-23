@@ -107,6 +107,12 @@ the MCP client's header configuration. The gateway owns credential custody,
 upstream validation, expiry and header injection; this resource assignment is
 the broker's login-routing policy, not a credential vault.
 
+An `oidc` method can wrap a plain OAuth 2.0 connector by requesting scopes
+without `openid` and configuring its userinfo endpoint. With explicit
+authorization and token endpoints, this mode does not require OIDC discovery
+or a `jwks_uri`. OIDC connectors still require signing keys and verified ID
+tokens; omitting keys does not downgrade an OIDC login.
+
 Keep subject prefixes disjoint, including when methods serve different
 resources. Use an explicit empty prefix on a migrated existing method only
 when its subjects must remain unchanged.
