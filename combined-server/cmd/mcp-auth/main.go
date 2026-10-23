@@ -29,17 +29,17 @@ func main() {
 func run() error {
 	auth, closeStore, err := application.Open(server.ConfigFromEnv())
 	if err != nil {
-		return err
+		return errors.New("OAuth initialization failed; verify identity and storage configuration")
 	}
 	defer closeStore()
 	servers := []*http.Server{{Addr: auth.Config.ListenAddr, Handler: auth.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}}
 	if path := os.Getenv("MCP_AUTH_CREDENTIAL_GATEWAY_CONFIG"); path != "" {
 		gateway, err := credentialgateway.Open(path, version)
 		if err != nil {
-			return err
+			return errors.New("credential gateway initialization failed; verify provider files, mappings and service configuration")
 		}
 		if err := combinedserver.Attach(auth, gateway); err != nil {
-			return err
+			return errors.New("credential gateway and OAuth registration configuration conflict")
 		}
 		servers = append(servers, &http.Server{Addr: gateway.ListenAddr(), Handler: gateway.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second})
 	}
