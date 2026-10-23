@@ -47,7 +47,7 @@ export default withMermaid({
   base: '/docs/',
   cleanUrls: true,
   lastUpdated: true,
-  sitemap: { hostname: siteUrl },
+  sitemap: { hostname: `${siteUrl}/docs/` },
   markdown: { config: repoLinks },
   head: [
     ['link', { rel: 'icon', type: 'image/svg+xml', href: '/docs/favicon.svg' }],
