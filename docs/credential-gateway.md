@@ -124,7 +124,7 @@ clear anyone's stored values.
 ## Runtime authoring and client configuration
 
 Runtime's `.mcp/servers.yaml` can declare `auth.credentialGateway` for a
-header-mode server, and `mcp-runtime cluster mcp-auth-connector credential-gateway` derives the
+header-mode server, and `mcp-runtime gateway apply` derives the
 gateway's service entries and the mcp-auth wiring from the pushed servers. See the
 [Runtime credential-form example](https://github.com/tavric-labs/mcp-runtime/tree/examples/onepassword_credential_demo/examples/credential-form-demo).
 
