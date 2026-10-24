@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"time"
@@ -161,14 +162,43 @@ func (r *Runtime) validateUpstream(ctx context.Context, s config.Service, values
 	}
 	resp, err := r.client.Do(req)
 	if err != nil {
+		slog.Warn("credential gateway could not reach the upstream validation endpoint", "service", s.ID, "cause", transportCause(err))
 		return ErrUnavailable
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		slog.Warn("credential gateway upstream refused the validation request", "service", s.ID, "status", resp.StatusCode)
 		return ErrRejected
 	}
 	return nil
+}
+
+// transportCause names why a request failed without quoting the error, which
+// can contain the URL. It is for operators diagnosing an unreachable upstream.
+func transportCause(err error) string {
+	var dns *net.DNSError
+	var unknownAuthority x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	var op *net.OpError
+	switch {
+	case errors.As(err, &dns):
+		return "dns"
+	case errors.As(err, &unknownAuthority), errors.As(err, &hostname), errors.As(err, &invalid):
+		return "tls-certificate"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.As(err, &op) && op.Op == "dial":
+		if op.Timeout() {
+			return "connect-timeout"
+		}
+		return "connect-refused-or-unroutable"
+	case errors.As(err, &op):
+		return "network-" + op.Op
+	default:
+		return "transport"
+	}
 }
 
 // FormField is one input on a form-source service's sign-in page.
