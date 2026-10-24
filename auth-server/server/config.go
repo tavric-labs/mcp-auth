@@ -59,6 +59,12 @@ type Config struct {
 	// several sign-in methods offered on one login page. It replaces
 	// MCP_AUTH_CONNECTOR, and the two cannot both be set.
 	LoginMethodsFile string
+	// ResourceLoginsFile adds sign-in methods that apply only to the resources
+	// they name, next to the single connector selected by MCP_AUTH_CONNECTOR.
+	// Every other resource keeps the connector's own flow, including downstream
+	// token exchange. A deployment using LoginMethodsFile lists such methods
+	// there instead, with `resources`.
+	ResourceLoginsFile string
 	// LoginTTL bounds how long a person has to finish signing in, from the
 	// login page or the upstream provider back to this server. It is longer
 	// than AuthorizationCodeTTL because it covers typing a password.
@@ -160,9 +166,15 @@ func (c *Config) Validate() error {
 	if c.ConnectorName != "" && c.ConnectorsFile == "" {
 		return errors.New("MCP_AUTH_CONNECTORS_FILE is required when MCP_AUTH_CONNECTOR is set")
 	}
+	if c.ResourceLoginsFile != "" && c.ConnectorName == "" && !c.LocalDevelopment {
+		return errors.New("MCP_AUTH_RESOURCE_LOGINS_FILE needs MCP_AUTH_CONNECTOR; with MCP_AUTH_LOGIN_METHODS_FILE, scope methods with `resources` there")
+	}
+	if c.ResourceLoginsFile != "" && c.LoginMethodsFile != "" {
+		return errors.New("MCP_AUTH_RESOURCE_LOGINS_FILE and MCP_AUTH_LOGIN_METHODS_FILE cannot both be set; scope methods with `resources` in the login methods file")
+	}
 	// A login methods file may reference connectors by name, so the connectors
 	// file is legitimate there without a single selected connector.
-	if c.ConnectorsFile != "" && c.ConnectorName == "" && c.LoginMethodsFile == "" {
+	if c.ConnectorsFile != "" && c.ConnectorName == "" && c.LoginMethodsFile == "" && c.ResourceLoginsFile == "" {
 		return errors.New("MCP_AUTH_CONNECTOR is required when MCP_AUTH_CONNECTORS_FILE is set")
 	}
 	if c.ResourceScopesJSON != "" {
@@ -333,6 +345,7 @@ func ConfigFromEnv() Config {
 		ConnectorsFile:              os.Getenv("MCP_AUTH_CONNECTORS_FILE"),
 		ConnectorName:               os.Getenv("MCP_AUTH_CONNECTOR"),
 		LoginMethodsFile:            os.Getenv("MCP_AUTH_LOGIN_METHODS_FILE"),
+		ResourceLoginsFile:          os.Getenv("MCP_AUTH_RESOURCE_LOGINS_FILE"),
 		LoginTTL:                    durationEnv("MCP_AUTH_LOGIN_TTL", defaultLoginTTL),
 		StoreBackend:                env("MCP_AUTH_STORE", "memory"),
 		DatabaseURL:                 os.Getenv("MCP_AUTH_DATABASE_URL"),

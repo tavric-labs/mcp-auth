@@ -32,6 +32,22 @@ func Open(config server.Config) (*server.Server, func(), error) {
 	if err != nil {
 		return fail(err)
 	}
+	if config.ResourceLoginsFile != "" {
+		logins, err := server.LoadResourceLogins(config.ResourceLoginsFile, server.LoginMethodsOptions{
+			CallbackURL:    config.IdentityCallbackURL(),
+			ConnectorsFile: config.ConnectorsFile,
+			AllowInsecure:  config.LocalDevelopment || config.AllowInsecureConnectors,
+		})
+		if err != nil {
+			return fail(err)
+		}
+		for _, resource := range logins.ResourceURLs() {
+			if !slices.Contains(config.Resources, resource) {
+				return fail(fmt.Errorf("resource login names %q, which is not in MCP_AUTH_RESOURCES", resource))
+			}
+		}
+		auth.ResourceLogins = logins
+	}
 	if err = loadResourceClients(auth.Store, config.ResourceClientsFile, config.Resources); err != nil {
 		return fail(err)
 	}

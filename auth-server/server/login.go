@@ -226,6 +226,15 @@ func (r *LoginRegistry) entriesForResource(resource string) []LoginEntry {
 	return defaults
 }
 
+// ResourceURLs lists every resource some method is assigned to.
+func (r *LoginRegistry) ResourceURLs() []string {
+	var out []string
+	for _, entry := range r.entries {
+		out = append(out, entry.Resources...)
+	}
+	return out
+}
+
 // servesResource reports whether a method is explicitly assigned to resource.
 // It is nil-safe, so a server with no resource logins answers false.
 func (r *LoginRegistry) servesResource(resource string) bool {
@@ -412,13 +421,4 @@ func (t loginTicket) abandon() {
 	if len(t.limiter.attempts[t.key]) == 0 {
 		delete(t.limiter.attempts, t.key)
 	}
-}
-
-// WithEntries returns a registry holding this one's methods followed by
-// entries, validated together so ids, prefixes and resource assignments cannot
-// collide. A deployment that adds methods after startup, such as a gateway's
-// per-resource sign-in forms, installs the result as the identity provider.
-func (r *LoginRegistry) WithEntries(entries ...LoginEntry) (*LoginRegistry, error) {
-	combined := append(append([]LoginEntry(nil), r.entries...), entries...)
-	return NewLoginRegistry(combined...)
 }

@@ -107,6 +107,35 @@ the MCP client's header configuration. The gateway owns credential custody,
 upstream validation, expiry and header injection; this resource assignment is
 the broker's login-routing policy, not a credential vault.
 
+## Resource logins next to a single connector
+
+A deployment that signs everyone in through one connector (`MCP_AUTH_CONNECTOR`)
+can still send particular resources to their own sign-in, without switching to
+login methods mode and without touching the connector's flow for anything else.
+Set `MCP_AUTH_RESOURCE_LOGINS_FILE` to a file with the same `methods` format,
+where each method names the resources it serves:
+
+```json
+{"methods": [
+  {"id": "form-gitlab", "type": "oidc", "connector": "gitlab-login",
+   "subject_prefix": "form-gitlab:", "resources": ["https://auth.example.com/gitlab/mcp"]}
+]}
+```
+
+- A method here must set `resources` and a **non-empty** `subject_prefix`. An empty
+  prefix could mint a subject equal to one the connector issues, letting one
+  sign-in stand in for another.
+- The connectors it references come from `MCP_AUTH_CONNECTORS_FILE`, next to the
+  connector selected by `MCP_AUTH_CONNECTOR`.
+- A redirect method names itself in the upstream `state` (`<method>.<id>`), which
+  is how the shared `/identity/callback` tells its callbacks from the connector's.
+- Every resource the file names must also be in `MCP_AUTH_RESOURCES`.
+- The file cannot be combined with `MCP_AUTH_LOGIN_METHODS_FILE`; in that mode, scope
+  methods with `resources` in the methods file itself.
+
+[The credential gateway](credential-gateway.md) uses this to send a header-auth
+resource to its own sign-in page.
+
 An `oidc` method can wrap a plain OAuth 2.0 connector by requesting scopes
 without `openid` and configuring its userinfo endpoint. With explicit
 authorization and token endpoints, this mode does not require OIDC discovery
@@ -315,15 +344,3 @@ A method implements one of two small interfaces in
 Register it in `ParseLoginMethods` with a config type, the same way `ldap`
 does in `login_config.go`. The registry handles the page, the state, subject
 prefixing, throttling and audit.
-
-### Optional pre-authorization check
-
-Embedders may set `Server.ResourceAuthorizationCheck` before serving requests.
-The callback receives the verified, qualified subject and the stored OAuth
-resource after any login method succeeds, before upstream-session storage or
-code issuance. An error denies authorization without exposing the callback's
-error text. It runs for credential methods, redirect callbacks, and the single
-connector path. Refresh continues the existing session; per-request revocation
-checks remain the resource gateway's responsibility. The
-[combined credential gateway](credential-gateway.md) installs this hook for its
-configured resources and leaves other resources unchanged.

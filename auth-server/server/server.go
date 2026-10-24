@@ -16,26 +16,19 @@ import (
 	"time"
 )
 
-// ResourceAuthorizationCheck is an optional deployment check after identity
-// verification and before any authorization code is issued. Implementations must
-// use only the supplied verified subject and stored resource, and return redacted
-// errors. The core neither knows nor stores upstream credentials.
-type ResourceAuthorizationCheck func(context.Context, string, string) error
-
 type Server struct {
 	// ResourceLogins holds sign-in methods scoped to particular resources when
 	// the identity provider is a single connector rather than a login registry.
 	// A resource with an entry here signs in through it; every other resource
 	// keeps the connector's own flow, downstream token exchange included.
-	ResourceLogins             *LoginRegistry
-	ResourceAuthorizationCheck ResourceAuthorizationCheck
-	Config                     Config
-	Store                      Store
-	Keys                       *KeyManager
-	KeyProvider                KeyProvider
-	IdentityProvider           IdentityProvider
-	TokenExchanger             TokenExchanger
-	Audit                      *AuditLogger
+	ResourceLogins   *LoginRegistry
+	Config           Config
+	Store            Store
+	Keys             *KeyManager
+	KeyProvider      KeyProvider
+	IdentityProvider IdentityProvider
+	TokenExchanger   TokenExchanger
+	Audit            *AuditLogger
 	// ExternalCredentials maps a resource URL to its external credential
 	// connector. Exchanges from that resource's client take the
 	// credential-assertion path instead of TokenExchanger.
@@ -356,6 +349,16 @@ func (s *Server) identityCallback(w http.ResponseWriter, r *http.Request) {
 		s.registryCallback(w, r, registry)
 		return
 	}
+	// A redirect login assigned to one resource names itself in the state
+	// ("<method>.<id>"). The connector's own state has no such prefix.
+	if s.ResourceLogins != nil {
+		if methodID, _, found := strings.Cut(r.URL.Query().Get("state"), "."); found {
+			if _, known := s.ResourceLogins.lookup(methodID); known {
+				s.registryCallback(w, r, s.ResourceLogins)
+				return
+			}
+		}
+	}
 	interactive, ok := s.IdentityProvider.(InteractiveIdentityProvider)
 	if !ok {
 		http.NotFound(w, r)
@@ -389,13 +392,6 @@ func (s *Server) identityCallback(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) completeAuthorization(w http.ResponseWriter, r *http.Request, pending ConsentRequest, identity Identity) {
 	request := pending.Request
-	if s.ResourceAuthorizationCheck != nil {
-		if err := s.ResourceAuthorizationCheck(r.Context(), request.Resource, identity.Subject); err != nil {
-			s.Audit.Event("resource_authorization_check", "denied", map[string]any{"client_id": request.ClientID, "resource": request.Resource})
-			redirectError(w, r, request, "access_denied", "upstream credential validation failed", s.Config.Issuer, s.Config.AuthorizationResponseIssuer)
-			return
-		}
-	}
 	if identity.UpstreamSession != nil {
 		if err := s.Store.SaveUpstreamSession(identity.Subject, *identity.UpstreamSession); err != nil {
 			oauthError(w, http.StatusInternalServerError, "server_error")

@@ -183,6 +183,7 @@ Choose one login mode per process:
 
 - `MCP_AUTH_CONNECTOR`: one upstream OIDC/OAuth connector, including its
   `upstream_session` or `rfc8693` downstream-token strategy.
+- `MCP_AUTH_RESOURCE_LOGINS_FILE`: sign-in methods for particular resources next to the single connector.
 - `MCP_AUTH_LOGIN_METHODS_FILE`: several login options under one issuer. It
   establishes identity only; downstream access uses external credential
   assertions and resource-side credential resolution.
