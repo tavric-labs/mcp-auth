@@ -10,7 +10,6 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -21,7 +20,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -274,9 +272,10 @@ func Ref(user, service, field string) string {
 // MapStore is an in-memory mappings.Store for tests. The shipped store is the
 // form store; this one lets a test choose exactly which identities have values.
 type MapStore struct {
-	mu  sync.Mutex
-	m   map[[3]string]*mappings.Mapping
-	err error
+	mu      sync.Mutex
+	m       map[[3]string]*mappings.Mapping
+	err     error
+	version int
 }
 
 // SetErr makes every lookup fail with err, as an unavailable store would.
@@ -287,27 +286,20 @@ func (s *MapStore) SetErr(err error) {
 }
 
 // Replace sets the whole mapping table from entries shaped like DefaultMappings.
+// Every call gets a new version, so a gateway cache never serves an older table.
 func (s *MapStore) Replace(entries []map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.version++
 	table := map[[3]string]*mappings.Mapping{}
 	for _, e := range entries {
 		refs, _ := e["fields"].(map[string]string)
-		names := make([]string, 0, len(refs))
-		for name := range refs {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		hash := sha256.New()
-		for _, name := range names {
-			hash.Write([]byte(name + "=" + refs[name] + "\n"))
-		}
 		issuer, subject, service := e["issuer"].(string), e["subject"].(string), e["service"].(string)
 		table[[3]string{issuer, subject, service}] = &mappings.Mapping{
-			Issuer: issuer, Subject: subject, Service: service, Refs: refs, Version: hex.EncodeToString(hash.Sum(nil))[:16],
+			Issuer: issuer, Subject: subject, Service: service, Refs: refs, Version: fmt.Sprint(s.version),
 		}
 	}
-	s.mu.Lock()
 	s.m = table
-	s.mu.Unlock()
 }
 
 // Lookup implements mappings.Store.
