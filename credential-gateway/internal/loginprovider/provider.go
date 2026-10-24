@@ -156,17 +156,18 @@ func (p *Provider) prune() {
 }
 
 func (p *Provider) securePage(w http.ResponseWriter) {
-	issuer := ""
-	if u, err := url.Parse(p.cfg.CallbackURL); err == nil {
-		issuer = u.Scheme + "://" + u.Host
-	}
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Cache-Control", "no-store")
 	h.Set("Referrer-Policy", "same-origin")
 	h.Set("X-Content-Type-Options", "nosniff")
-	// The approved form redirects to mcp-auth, so its origin must be allowed.
-	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' "+issuer+"; frame-ancestors 'none'; base-uri 'none'")
+	// There is deliberately no form-action directive. A browser applies it to the
+	// whole redirect chain of a form submission: approve redirects to mcp-auth's
+	// callback, which redirects on to the MCP client's own redirect_uri (a loopback
+	// URL or an app scheme this service cannot know), and any form-action list
+	// short of that blocks the last hop. mcp-auth's own sign-in pages omit it for
+	// the same reason. Scripts, framing and base-URI stay locked down.
+	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'")
 }
 
 var page = template.Must(template.New("login").Parse(`<!DOCTYPE html>

@@ -137,8 +137,12 @@ func TestFullSignInIssuesAnOpaqueSubjectAndNeverEchoesValues(t *testing.T) {
 		}
 	}
 	csp := w.Header().Get("Content-Security-Policy")
-	if !strings.Contains(csp, "form-action 'self' https://auth.example.com") || !strings.Contains(csp, "frame-ancestors 'none'") {
+	if !strings.Contains(csp, "default-src 'none'") || !strings.Contains(csp, "frame-ancestors 'none'") || !strings.Contains(csp, "base-uri 'none'") {
 		t.Errorf("CSP = %q", csp)
+	}
+	// form-action would block the redirect on to the MCP client's redirect_uri.
+	if strings.Contains(csp, "form-action") {
+		t.Errorf("CSP restricts form-action, which breaks the redirect chain back to the client: %q", csp)
 	}
 	cookie := w.Result().Cookies()[0]
 	if !cookie.HttpOnly || !cookie.Secure || cookie.Path != "/demo/mcp/login" || cookie.SameSite != http.SameSiteLaxMode {
