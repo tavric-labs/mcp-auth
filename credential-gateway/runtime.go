@@ -1,5 +1,8 @@
-// Package credentialgateway composes the optional credential-injecting resource
-// gateway. The OAuth core depends on none of this module or its providers.
+// Package credentialgateway is the credential-injecting resource gateway. It is
+// its own service: mcp-auth sends the browser to the gateway's sign-in page for a
+// resource, the gateway validates and keeps the person's header values in memory,
+// and on later requests it verifies the OAuth bearer against mcp-auth and adds
+// those headers before forwarding to the upstream.
 package credentialgateway
 
 import (
@@ -11,21 +14,27 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"time"
+	"net/url"
+	"strings"
 
 	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/config"
 	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/credentials"
 	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/formstore"
 	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/gateway"
 	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/headers"
+	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/loginprovider"
 )
 
-type Resource struct {
-	ID, URL, ClientID, KeyID string
-	Scopes                   []string
-	PublicKeyPEM             string
-}
+// LoginClientID is the OAuth client id mcp-auth presents to a service's sign-in
+// endpoints. The connector entry for the service must use it.
+func LoginClientID(serviceID string) string { return "login-" + serviceID }
 
+// SubjectPrefix is what mcp-auth puts before the opaque subject the service's
+// sign-in returns. The login method for the service must use it as its
+// subject_prefix, because the gateway stores values under the prefixed subject.
+func SubjectPrefix(serviceID string) string { return "form-" + serviceID + ":" }
+
+// Runtime is a configured gateway.
 type Runtime struct {
 	cfg    *config.Config
 	creds  *credentials.Service
@@ -63,48 +72,76 @@ func newRuntime(cfg *config.Config, creds *credentials.Service, ready func() boo
 	}}
 }
 
-func (r *Runtime) ListenAddr() string    { return r.cfg.Listen }
-func (r *Runtime) Issuer() string        { return r.cfg.Issuer }
-func (r *Runtime) Handler() http.Handler { return gateway.New(r.cfg, r.creds, r.ready, nil) }
-func (r *Runtime) Resources() []Resource {
-	var out []Resource
+// ListenAddr is the address the gateway listens on.
+func (r *Runtime) ListenAddr() string { return r.cfg.Listen }
+
+// Issuer is the mcp-auth issuer the gateway trusts.
+func (r *Runtime) Issuer() string { return r.cfg.Issuer }
+
+// PublicKeyPEM returns the PEM public key for a service's resource client, which
+// mcp-auth needs to verify the assertion requests the gateway signs.
+func (r *Runtime) PublicKeyPEM(serviceID string) (string, bool) {
 	for _, s := range r.cfg.Services {
-		key, _ := x509.MarshalPKIXPublicKey(&s.Client.PrivateKey.PublicKey)
-		out = append(out, Resource{ID: s.ID, URL: s.ResourceURL, ClientID: s.Client.ClientID, KeyID: s.Client.KeyID, PublicKeyPEM: string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: key})), Scopes: append([]string(nil), s.RequiredScopes...)})
+		if s.ID == serviceID {
+			key, err := x509.MarshalPKIXPublicKey(&s.Client.PrivateKey.PublicKey)
+			if err != nil {
+				return "", false
+			}
+			return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: key})), true
+		}
 	}
-	return out
+	return "", false
 }
 
-// CheckAuthorization runs after sign-in and before code issuance. Every new
-// OAuth authorization resolves the values just submitted at sign-in afresh and
-// sends their rendered
-// headers to a fixed same-origin GET validation endpoint. A cache hit from an
-// older login cannot skip either check. Unmanaged resources retain their
-// normal OAuth behavior.
-func (r *Runtime) CheckAuthorization(ctx context.Context, resource, subject string) error {
+// Handler serves the proxy and, under each service's path, the sign-in
+// endpoints mcp-auth uses: /login/authorize, /login/approve, /login/token and
+// /login/userinfo.
+func (r *Runtime) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/", gateway.New(r.cfg, r.creds, r.ready, nil))
 	for _, s := range r.cfg.Services {
-		if s.ResourceURL != resource {
-			continue
+		provider := r.loginProvider(s)
+		for _, path := range r.servicePaths(s) {
+			mux.Handle(path+"/login/", http.StripPrefix(path, provider))
 		}
-		identity := credentials.Identity{Issuer: r.cfg.Issuer, Subject: subject}
-		fresh := &credentials.Service{Mappings: r.creds.Mappings, Resolver: r.creds.Resolver, TTL: 0, Max: 1}
-		values, err := fresh.HeadersFor(ctx, identity, s.ID, s.Headers, time.Now())
-		if err == nil {
-			err = r.validateUpstream(ctx, s, values.Values())
-		} else {
-			err = ErrRejected
-		}
-		if err != nil {
-			if s.Source == config.SourceForm && r.forms != nil {
-				// Values that failed the check must not outlive the attempt.
-				r.forms.Delete(r.cfg.Issuer, subject, s.ID)
-			}
-			return err
-		}
-		r.creds.Invalidate(identity, s.ID)
-		return nil
 	}
-	return nil
+	return mux
+}
+
+// servicePaths: the canonical path plus the path left after an ingress strips
+// the configured public prefix.
+func (r *Runtime) servicePaths(s config.Service) []string {
+	paths := []string{s.ResourcePath}
+	if p := r.cfg.PublicPathPrefix; p != "" && strings.HasPrefix(s.ResourcePath, p+"/") {
+		paths = append(paths, strings.TrimPrefix(s.ResourcePath, p))
+	}
+	return paths
+}
+
+func (r *Runtime) loginProvider(s config.Service) *loginprovider.Provider {
+	resource, _ := url.Parse(s.ResourceURL)
+	fields := make([]loginprovider.Field, 0, len(s.FormFields))
+	for _, f := range s.FormFields {
+		fields = append(fields, loginprovider.Field{Name: f.Name, Label: f.Label, Secret: f.Secret})
+	}
+	return loginprovider.New(loginprovider.Config{
+		ClientID:    LoginClientID(s.ID),
+		Origin:      resource.Scheme + "://" + resource.Host,
+		BasePath:    s.ResourcePath,
+		CallbackURL: r.cfg.Issuer + "/identity/callback",
+		Fields:      fields,
+		Authenticate: func(ctx context.Context, values map[string]string) (string, error) {
+			subject, err := r.authenticateForm(ctx, s.ID, SubjectPrefix(s.ID), values)
+			switch {
+			case err == nil:
+				return subject, nil
+			case errors.Is(err, ErrRejected):
+				return "", loginprovider.ErrRejected
+			default:
+				return "", loginprovider.ErrUnavailable
+			}
+		},
+	})
 }
 
 // validateUpstream sends rendered headers to the service's validation URL.
@@ -159,43 +196,15 @@ func transportCause(err error) string {
 	}
 }
 
-// FormField is one input on a form-source service's sign-in page.
-type FormField struct {
-	Name, Label string
-	Secret      bool
-}
-
-// FormService describes a service whose credentials a person submits at sign-in.
-type FormService struct {
-	ID, ResourceURL string
-	Fields          []FormField
-}
-
-// FormServices lists the form-source services, for the OAuth side to offer a
-// sign-in method per resource.
-func (r *Runtime) FormServices() []FormService {
-	var out []FormService
-	for _, s := range r.cfg.Services {
-		if s.Source != config.SourceForm {
-			continue
-		}
-		service := FormService{ID: s.ID, ResourceURL: s.ResourceURL}
-		for _, f := range s.FormFields {
-			service.Fields = append(service.Fields, FormField{Name: f.Name, Label: f.Label, Secret: f.Secret})
-		}
-		out = append(out, service)
-	}
-	return out
-}
-
-// AuthenticateForm validates submitted values at the upstream and, only when it
-// accepts them, keeps them in memory under a fresh random subject. It returns
-// that subject without subjectPrefix, which the caller's login method adds.
-// Rejected values yield ErrRejected, an unreachable upstream ErrUnavailable.
-func (r *Runtime) AuthenticateForm(ctx context.Context, serviceID, subjectPrefix string, submitted map[string]string) (string, error) {
+// authenticateForm validates submitted values at the upstream and, only when it
+// accepts them, keeps them in memory under subjectPrefix plus a fresh random
+// subject. It returns the random part, which is what the sign-in hands to
+// mcp-auth. Rejected values yield ErrRejected, an unreachable upstream
+// ErrUnavailable; nothing is stored in either case.
+func (r *Runtime) authenticateForm(ctx context.Context, serviceID, subjectPrefix string, submitted map[string]string) (string, error) {
 	var service *config.Service
 	for i := range r.cfg.Services {
-		if r.cfg.Services[i].ID == serviceID && r.cfg.Services[i].Source == config.SourceForm {
+		if r.cfg.Services[i].ID == serviceID {
 			service = &r.cfg.Services[i]
 		}
 	}

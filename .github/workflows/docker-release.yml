@@ -10,7 +10,7 @@ permissions:
 env:
   REGISTRY: docker.io
   IMAGE_NAME: princekrroshan01/mcp-auth-server
-  COMBINED_IMAGE_NAME: princekrroshan01/mcp-auth-combined
+  GATEWAY_IMAGE_NAME: princekrroshan01/mcp-credential-gateway
 
 jobs:
   release-artifacts:
@@ -76,8 +76,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-  build-and-push-combined:
-    name: Build and push the combined (credential gateway) image
+  build-and-push-gateway:
+    name: Build and push the credential gateway image
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -95,17 +95,17 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.COMBINED_IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ env.GATEWAY_IMAGE_NAME }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{raw}}
             type=raw,value=latest,enable=${{ github.event.release.prerelease == false }}
 
-      # The combined module imports sibling modules, so the context is the root.
+      # The gateway module imports the SDK next to it, so the context is the root.
       - uses: docker/build-push-action@v5
         with:
           context: .
-          file: combined-server/Dockerfile
+          file: credential-gateway/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}

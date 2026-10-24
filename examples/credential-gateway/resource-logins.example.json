@@ -1,0 +1,13 @@
+{
+  "methods": [
+    {
+      "id": "form-gitlab",
+      "type": "oidc",
+      "connector": "gitlab-login",
+      "subject_prefix": "form-gitlab:",
+      "resources": [
+        "https://auth.example.com/gitlab/mcp"
+      ]
+    }
+  ]
+}

@@ -36,5 +36,4 @@ jobs:
           (cd auth-server && GOWORK=off go build ./...)
           (cd auth-client/go && GOWORK=off go build ./...)
           (cd credential-gateway && GOWORK=off go build ./...)
-          (cd combined-server && GOWORK=off go build ./...)
       - uses: github/codeql-action/analyze@v3

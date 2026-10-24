@@ -23,8 +23,6 @@ jobs:
             path: auth-client/go
           - name: credential-gateway
             path: credential-gateway
-          - name: combined-server
-            path: combined-server
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -183,8 +181,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build image
         run: docker build --tag mcp-auth-server:ci auth-server
-      - name: Build optional combined image
-        run: docker build --file combined-server/Dockerfile --tag mcp-auth-combined:ci .
+      - name: Build credential gateway image
+        run: docker build --file credential-gateway/Dockerfile --tag mcp-credential-gateway:ci .
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -195,10 +193,10 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
-      - name: Scan optional combined image with Trivy
+      - name: Scan credential gateway image with Trivy
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: mcp-auth-combined:ci
+          image-ref: mcp-credential-gateway:ci
           format: table
           scanners: vuln,secret,misconfig
           vuln-type: os,library

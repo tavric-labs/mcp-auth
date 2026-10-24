@@ -25,7 +25,6 @@
         "key_id": "gateway-1",
         "private_key_file": "/run/secrets/gitlab-client.pem"
       },
-      "source": "form",
       "form_fields": [
         {
           "name": "username",

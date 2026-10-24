@@ -1,0 +1,20 @@
+{
+  "gitlab-login": {
+    "issuer": "https://auth.example.com/gitlab/mcp/login",
+    "authorization_endpoint": "https://auth.example.com/gitlab/mcp/login/authorize",
+    "token_endpoint": "https://auth.example.com/gitlab/mcp/login/token",
+    "userinfo_endpoint": "https://auth.example.com/gitlab/mcp/login/userinfo",
+    "client_id": "login-gitlab",
+    "exchange_client_id": "unused-in-login-registry-mode",
+    "token_endpoint_auth_method": "none",
+    "scopes": [
+      "profile"
+    ],
+    "identity_claims": [
+      "sub"
+    ],
+    "allowed_upstream_callback_uris": [
+      "https://auth.example.com/mcp-auth/identity/callback"
+    ]
+  }
+}

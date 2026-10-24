@@ -84,13 +84,14 @@ downstream credential through token exchange or the connector's upstream session
 ## Optional credential gateway
 
 For header-authenticated upstream MCP servers, the optional
-[combined service](docs/credential-gateway.md) includes OAuth and a credential
-proxy in one deployment. A sign-in page asks for the headers a server declares,
-validates them at the upstream before issuing an authorization code, keeps them
-in memory, and supplies them on later MCP calls, so the client holds only a
-bearer token and a URL. No identity provider or vault is involved. OAuth-only
-installations keep the existing binary; the authorization-server module and
-SDKs have no vault dependency.
+[credential gateway](docs/credential-gateway.md) runs as its own service next to
+mcp-auth. mcp-auth sends the browser to the gateway's sign-in page for that
+resource; the page asks for the headers the server declares, validates them at the
+upstream, and keeps them in memory. The client then holds only a bearer token and a
+URL, and the gateway supplies the headers on every request. mcp-auth never sees the
+values, and no identity provider or vault is involved. OAuth-only installations keep
+the existing image; the authorization-server module and SDKs have no gateway
+dependency.
 
 ## Try it
 
