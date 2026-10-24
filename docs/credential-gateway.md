@@ -5,13 +5,10 @@ password, API token, or other authentication headers. MCP clients keep only the
 gateway's public URL. They obtain an OAuth token from mcp-auth; the gateway
 supplies the upstream headers on POST, GET/SSE, and DELETE.
 
-This is an optional source-build feature pending review and release. The
-existing OAuth-only image and SDKs keep their provider-neutral dependencies.
-The separate onepassword-mcp-plugin repository remains available; this change
-migrates its gateway implementation from commit
-`0f9815448dc9d3fe3164d49cbb4fa2a5d05585eb` into this repository without deleting
-it. Most gateway code and its tests are retained, with provider selection and
-pre-authorization validation added around them.
+This is an optional feature. The existing OAuth-only image and SDKs keep their
+provider-neutral dependencies. The shipped binary serves **form-source** services:
+the person supplies the header values at sign-in and the gateway keeps them in
+memory. It bundles no vault provider; see [Vault sources](#vault-sources).
 
 ## Packaging and ownership
 
@@ -19,7 +16,6 @@ pre-authorization validation added around them.
 | --- | --- |
 | `auth-server` | Identity login, consent, PKCE, scoped tokens, refresh, session revocation; generic pre-authorization callback |
 | `credential-gateway` | Private identity/service mappings, credential cache, header transforms, fixed upstream proxy, bound MCP session IDs |
-| `credential-gateway/providers/onepassword` | 1Password SDK service-account access or local desktop CLI access and `op://` validation |
 | `combined-server` | Starts both listeners in one process and attaches the gateway's authorization check |
 
 The combined binary serves OAuth on `MCP_AUTH_LISTEN_ADDR` (default `:8080`) and the
@@ -78,11 +74,10 @@ configured MCP path for this purpose.
 ## Configuration
 
 Start with [config.example.json](../examples/credential-gateway/config.example.json)
-and [mappings.example.json](../examples/credential-gateway/mappings.example.json).
-Replace the example hosts, vault references, and verified subject. Mount the
-operator's private config, mapping file, resource-client RSA key and at least
-32-character session binding key read-only. Secret contents never belong in
-`mcp.json`, `.mcp/servers.yaml`, a container image, or Git.
+and replace the example hosts. Mount the operator's private config,
+resource-client RSA key and at least 32-character session binding key read-only.
+Secret contents never belong in `mcp.json`, `.mcp/servers.yaml`, a container
+image, or Git.
 
 Configure the existing identity provider as usual, then add:
 
@@ -113,45 +108,16 @@ Routing/framing/protocol headers cannot be injected. Cache defaults are 300
 seconds and 1024 entries. TTL may be 0–3600 seconds. Each gateway instance uses
 one configured provider; a single provider can serve multiple upstream services.
 
-## 1Password modes
+## Vault sources
 
-Hosted automation uses:
-
-```json
-{"type":"onepassword","options":{
-  "mode":"service_account",
-  "service_account_token_file":"/run/secrets/onepassword-service-account",
-  "timeout_seconds":30
-}}
-```
-
-Scope this service account to the required vaults. Human authentication still
-comes from the configured identity provider. Service-account reads do not open
-a user's desktop app. A real service-account canary is required before production
-use; tests substitute a fake vault.
-
-A **locally running** gateway may instead select:
-
-```json
-{"type":"onepassword","options":{
-  "mode":"desktop","account":"my.1password.com","timeout_seconds":60
-}}
-```
-
-Install `op`, run the desktop app, and enable its CLI integration on that same
-machine. The provider sets the documented app-integration switch and removes
-service-account, Connect and CLI-session environment credentials before `op read`.
-It selects the configured account explicitly. See
-[1Password desktop integration](https://developer.1password.com/docs/cli/app-integration/)
-and [CLI environment variables](https://developer.1password.com/docs/cli/environment-variables/).
-1Password controls the available unlock method and cached approvals; the gateway
-cannot force a fresh password dialog for each client. The bundled container is
-for service-account mode and does not include `op` or a desktop app.
-
-A hosted gateway cannot invoke a remote user's desktop app. Uploading personal
-desktop credentials into a hosted gateway requires a separate, authenticated
-local-connector handoff; that feature is **not** included in this bundle. The
-Runtime protocol fixture's local adapter is not that production handoff.
+A service with `"source": "vault"` takes its header values from mapped vault
+references (`provider`, `mappings_file`) instead of from the person. The shipped
+binary registers **no** vault provider, so it accepts only `source: "form"`
+services and refuses a vault service at startup with "credential provider is
+not registered". A deployment that wants a vault embeds the gateway and
+registers its own provider; see [Adding another vault](#adding-another-vault).
+Human authentication still comes from the configured identity provider, and a
+hosted gateway cannot invoke a remote user's desktop password manager.
 
 ## Runtime authoring and client configuration
 
@@ -165,12 +131,11 @@ The client connects to **`resource_url`**, not the raw header-authenticated
 upstream URL:
 
 ```json
-{"mcpServers":{"vault-demo":{"url":"https://credentials.example.com/vault-header-demo/mcp"}}}
+{"mcpServers":{"gitlab":{"url":"https://auth.example.com/gitlab/mcp"}}}
 ```
 
-See the [Runtime header-only example](https://github.com/tavric-labs/mcp-runtime/tree/examples/onepassword_credential_demo/examples/vault-header-demo)
-for deployable upstream source and paired configuration. No new Runtime metadata
-field or CRD is needed for this separate gateway route.
+See the [Runtime credential-form example](https://github.com/tavric-labs/mcp-runtime/tree/examples/onepassword_credential_demo/examples/credential-form-demo)
+for deployable upstream source and its `servers.yaml`.
 
 ## Adding another vault
 
@@ -235,7 +200,7 @@ credential field the headers read:
 
 The MCP client's configuration is the resource URL alone. Its OAuth flow shows
 a sign-in page for this resource only, with those inputs. A browser password
-manager, such as the 1Password extension, can fill them. The gateway sends the
+manager, such as a browser or extension, can fill them. The gateway sends the
 values to `validation_url`; only a 2xx response issues the authorization code.
 A refused sign-in shows the form again, throttled per account name; an
 unreachable upstream shows a temporary-failure message.
@@ -248,11 +213,6 @@ on restart, so people sign in again. They are not shared between replicas, so
 run one replica or route a client to the same one. Rejected values are never
 stored. Each header then uses the same transforms and per-request injection as
 vault services.
-
-An optional `vault_url` (an `https` URL, or a `onepassword://` app link) adds an
-"open your vault" link beside the form, in a new tab, so the person can open
-the vault page and copy the values. Nothing is fetched from it; other schemes,
-credentials in the URL and markup characters are refused.
 
 `form_fields` must be exactly the credential fields the headers read. A
 deployment with only form services needs no `provider` or `mappings_file`, and

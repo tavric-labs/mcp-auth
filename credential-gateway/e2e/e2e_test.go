@@ -117,7 +117,7 @@ func newStack(t *testing.T) *stack {
 	writePEM(t, filepath.Join(dir, "rc-public.pem"), "PUBLIC KEY", rcPub)
 
 	ext, _ := json.Marshal([]map[string]any{{
-		"id": "gitlab-1password", "resource": resource, "required_scopes": []string{"gitlab:use"},
+		"id": "gitlab-vault", "resource": resource, "required_scopes": []string{"gitlab:use"},
 		"resource_client": map[string]any{"client_id": "gitlab-plugin", "public_key_file": filepath.Join(dir, "rc-public.pem")},
 	}})
 	if err := os.WriteFile(filepath.Join(dir, "external.json"), ext, 0o600); err != nil {
@@ -141,7 +141,7 @@ func newStack(t *testing.T) *stack {
 		"authorization_server":     map[string]any{"issuer": s.issuer},
 		"session_binding_key_file": filepath.Join(dir, "session.key"),
 		"mappings_file":            s.mapFile,
-		"provider":                 map[string]any{"type": "onepassword", "options": map[string]any{"mode": "service_account", "service_account_token_file": filepath.Join(dir, "op.token")}},
+		"provider":                 map[string]any{"type": "vault", "options": map[string]any{"mode": "service_account", "service_account_token_file": filepath.Join(dir, "op.token")}},
 		"services": []any{map[string]any{
 			"id": "gitlab", "resource_url": resource, "upstream_url": s.upstream.Server.URL + "/api/v4/mcp_server", "validation_url": s.upstream.Server.URL + "/auth/check",
 			"required_scopes": []string{"gitlab:use"},

@@ -41,7 +41,7 @@ type Store interface {
 }
 
 var (
-	// op://vault/item/field or op://vault/item/section/field
+	// scheme://vault/item/field, or any grammar the registered provider accepts
 
 	fieldRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
 )

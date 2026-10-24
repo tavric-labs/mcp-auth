@@ -21,7 +21,6 @@ import (
 	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/headers"
 	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/mappings"
 	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/secrets"
-	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/providers/onepassword"
 )
 
 type Resolver = secrets.Resolver
@@ -54,11 +53,12 @@ var (
 	ErrUnavailable = errors.New("upstream validation unavailable")
 )
 
-// Open loads a gateway with the built-in 1Password provider.
+// Open loads a gateway that serves form-source services: header values a person
+// submits at sign-in. It registers no vault provider. A deployment that reads
+// credentials from a vault embeds the gateway and passes its own provider to
+// OpenWithProviders.
 func Open(path, version string) (*Runtime, error) {
-	return OpenWithProviders(path, version, map[string]ProviderFactory{
-		"onepassword": {New: onepassword.New, ValidReference: onepassword.ValidReference},
-	})
+	return OpenWithProviders(path, version, nil)
 }
 
 func OpenWithProviders(path, version string, providers map[string]ProviderFactory) (*Runtime, error) {
@@ -211,8 +211,6 @@ type FormField struct {
 type FormService struct {
 	ID, ResourceURL string
 	Fields          []FormField
-	// VaultURL, when set, is shown beside the form as where to find the values.
-	VaultURL string
 }
 
 // FormServices lists the form-source services, for the OAuth side to offer a
@@ -223,7 +221,7 @@ func (r *Runtime) FormServices() []FormService {
 		if s.Source != config.SourceForm {
 			continue
 		}
-		service := FormService{ID: s.ID, ResourceURL: s.ResourceURL, VaultURL: s.VaultURL}
+		service := FormService{ID: s.ID, ResourceURL: s.ResourceURL}
 		for _, f := range s.FormFields {
 			service.Fields = append(service.Fields, FormField{Name: f.Name, Label: f.Label, Secret: f.Secret})
 		}

@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"html/template"
 	"net/url"
 	"regexp"
 	"strings"
@@ -76,43 +75,6 @@ type CredentialLoginMethod interface {
 	// unknown, so the response never distinguishes the two. Any other error
 	// means the method itself failed, such as an unreachable directory.
 	Authenticate(ctx context.Context, request IdentityRequest, attempt LoginAttempt) (Identity, error)
-}
-
-// LoginHelpLink is an optional interface for a CredentialLoginMethod that points
-// the person at where to find the values it asks for, such as a password
-// manager's vault page. The link opens in a new tab beside the form. Only
-// https URLs and the onepassword:// app scheme are rendered; anything else is
-// dropped, so a method cannot inject a script or data URL into the page.
-type LoginHelpLink interface {
-	HelpLink() (label, href string)
-}
-
-// safeHelpLink returns a renderable link, or empty strings when the method has
-// none or its URL is not allowed.
-func safeHelpLink(method LoginMethod) (string, template.URL) {
-	linker, ok := method.(LoginHelpLink)
-	if !ok {
-		return "", ""
-	}
-	label, href := linker.HelpLink()
-	label, href = strings.TrimSpace(label), strings.TrimSpace(href)
-	parsed, err := url.Parse(href)
-	if err != nil || href == "" || len(href) > 2048 || parsed.User != nil || strings.ContainsAny(href, "\r\n\t \"'<>") {
-		return "", ""
-	}
-	switch parsed.Scheme {
-	case "https":
-		if parsed.Host == "" {
-			return "", ""
-		}
-	case "onepassword":
-	default:
-		return "", ""
-	}
-	if label == "" || len(label) > 120 {
-		label = "Open your password manager"
-	}
-	return label, template.URL(parsed.String())
 }
 
 // ErrInvalidCredentials is the one answer a CredentialLoginMethod gives for a

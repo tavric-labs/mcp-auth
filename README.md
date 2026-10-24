@@ -85,13 +85,12 @@ downstream credential through token exchange or the connector's upstream session
 
 For header-authenticated upstream MCP servers, the optional
 [combined service](docs/credential-gateway.md) includes OAuth and a credential
-proxy in one deployment. It resolves approved per-user vault references,
-validates the upstream credentials before issuing a new authorization code,
-and supplies headers on later MCP calls. 1Password service-account and local
-desktop modes are included. OAuth-only installations keep the existing binary;
-the authorization-server module and SDKs have no vault dependency.
-
-This bundle is a source-build feature pending review and release.
+proxy in one deployment. A sign-in page asks for the headers a server declares,
+validates them at the upstream before issuing an authorization code, keeps them
+in memory, and supplies them on later MCP calls, so the client holds only a
+bearer token and a URL. No identity provider or vault is involved. OAuth-only
+installations keep the existing binary; the authorization-server module and
+SDKs have no vault dependency.
 
 ## Try it
 

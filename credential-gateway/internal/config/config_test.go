@@ -34,7 +34,7 @@ func fixture(t *testing.T, mutate func(map[string]any)) ([]byte, string) {
 		"authorization_server":     map[string]any{"issuer": "https://auth.example.com"},
 		"session_binding_key_file": filepath.Join(dir, "session.key"),
 		"mappings_file":            filepath.Join(dir, "mappings.json"),
-		"provider":                 map[string]any{"type": "onepassword", "options": map[string]any{"service_account_token_file": filepath.Join(dir, "op.token")}},
+		"provider":                 map[string]any{"type": "vault", "options": map[string]any{"token_file": filepath.Join(dir, "op.token")}},
 		"services": []any{map[string]any{
 			"id": "gitlab", "resource_url": "https://mcp.example.com/gitlab/mcp",
 			"upstream_url": "https://gitlab.example.com/api/v4/mcp_server", "validation_url": "https://gitlab.example.com/auth/check", "required_scopes": []string{"gitlab:use"},
@@ -211,32 +211,5 @@ func TestFormServiceRejectsBadFieldSets(t *testing.T) {
 		if _, err := Parse(data); err == nil {
 			t.Errorf("accepted: %s", name)
 		}
-	}
-}
-
-func TestFormServiceVaultURL(t *testing.T) {
-	good := []string{"", "https://taranawireless.1password.com/app#/vault", "onepassword://open/i?a=A&v=V&i=I"}
-	for _, link := range good {
-		data, _ := fixture(t, func(raw map[string]any) {
-			formService(raw)
-			service(raw)["vault_url"] = link
-		})
-		cfg, err := Parse(data)
-		if err != nil || cfg.Services[0].VaultURL != link {
-			t.Errorf("rejected or lost %q: %v", link, err)
-		}
-	}
-	for _, link := range []string{"javascript:alert(1)", "http://vault.example.com/", "https:///x", "https://u:p@vault.example.com/", "https://v.example.com/a b", "data:text/html,x"} {
-		data, _ := fixture(t, func(raw map[string]any) {
-			formService(raw)
-			service(raw)["vault_url"] = link
-		})
-		if _, err := Parse(data); err == nil {
-			t.Errorf("accepted %q", link)
-		}
-	}
-	data, _ := fixture(t, func(raw map[string]any) { service(raw)["vault_url"] = "https://vault.example.com/" })
-	if _, err := Parse(data); err == nil {
-		t.Error("vault_url accepted on a vault-source service")
 	}
 }

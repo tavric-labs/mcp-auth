@@ -360,7 +360,7 @@ func NewEnv(t testing.TB, mutate ...ConfigMutator) *Env {
 		"authorization_server":     map[string]any{"issuer": as.Issuer()},
 		"session_binding_key_file": filepath.Join(dir, "session.key"),
 		"mappings_file":            env.MappingsFile,
-		"provider":                 map[string]any{"type": "onepassword", "options": map[string]any{"mode": "service_account", "service_account_token_file": filepath.Join(dir, "op.token")}},
+		"provider":                 map[string]any{"type": "vault", "options": map[string]any{"mode": "service_account", "service_account_token_file": filepath.Join(dir, "op.token")}},
 		"credential_cache":         map[string]any{"ttl_seconds": 300, "max_entries": 16},
 		"limits":                   map[string]any{"max_request_bytes": 1 << 20},
 		"services": []any{

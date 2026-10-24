@@ -39,9 +39,28 @@ func TestFormLoginNeedsNoIdentityProviderOrVault(t *testing.T) { formLoginFlow(t
 func TestFormLoginCoexistsWithASingleConnector(t *testing.T) { formLoginFlow(t, false) }
 
 func formLoginFlow(t *testing.T, registryMode bool) {
+	formLoginFlowWith(t, registryMode, "alice", "glpat-fixture")
+}
+
+// TestFormLoginPreservesValuesExactly sends values with symbols, form-encoding
+// metacharacters, quotes and inner spaces through the real sign-in page and
+// checks the upstream receives each byte unchanged.
+func TestFormLoginPreservesValuesExactly(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"alice", `p@ss&w=rd%20+/;"'<>{}\|~^`},
+		{"a b c", "glpat-AbC_123-xyz.abc"},
+		{"user@example.com", strings.Repeat("Zz9+/=", 40)},
+		{"alice", "Bearer abc.def.ghi"},
+		{"x:y", "tab\there"},
+	} {
+		t.Run(pair[0], func(t *testing.T) { formLoginFlowWith(t, true, pair[0], pair[1]) })
+	}
+}
+
+func formLoginFlowWith(t *testing.T, registryMode bool, wantUser, wantToken string) {
 	var operations atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-GitLab-Username") != "alice" || r.Header.Get("X-GitLab-PAT-Token") != "glpat-fixture" {
+		if r.Header.Get("X-GitLab-Username") != wantUser || r.Header.Get("X-GitLab-PAT-Token") != wantToken {
 			w.WriteHeader(401)
 			return
 		}
@@ -105,7 +124,7 @@ func formLoginFlow(t *testing.T, registryMode bool) {
 		"session_binding_key_file": sessionFile,
 		"services": []any{map[string]any{
 			"id": "gitlab", "resource_url": resource, "upstream_url": upstream.URL + "/mcp", "validation_url": upstream.URL + "/check",
-			"required_scopes": []string{"tools:read"}, "source": "form", "vault_url": "https://taranawireless.1password.com/app",
+			"required_scopes": []string{"tools:read"}, "source": "form",
 			"form_fields": []any{
 				map[string]any{"name": "username", "label": "GitLab username"},
 				map[string]any{"name": "token", "label": "GitLab personal access token", "secret": true},
@@ -169,9 +188,6 @@ func formLoginFlow(t *testing.T, registryMode bool) {
 			t.Fatal(err)
 		}
 		page = body(resp)
-		if !strings.Contains(page, `href="https://taranawireless.1password.com/app"`) {
-			t.Fatalf("the configured vault link is missing from the sign-in page: %s", page)
-		}
 		if !strings.Contains(page, "GitLab username") || !strings.Contains(page, `type="password"`) {
 			t.Fatalf("expected the two header inputs: %s", page)
 		}
@@ -195,7 +211,7 @@ func formLoginFlow(t *testing.T, registryMode bool) {
 	if q := signIn("alice", "wrong"); q.Get("code") != "" || q.Get("form_status") != "401" {
 		t.Fatalf("wrong header values must be refused on the form without a grant: %v", q)
 	}
-	q := signIn("alice", "glpat-fixture")
+	q := signIn(wantUser, wantToken)
 	if q.Get("code") == "" {
 		t.Fatalf("the submitted values did not issue a grant: %v", q)
 	}
@@ -207,7 +223,7 @@ func formLoginFlow(t *testing.T, registryMode bool) {
 	json.NewDecoder(resp.Body).Decode(&tokens)
 	resp.Body.Close()
 	raw, _ := json.Marshal(tokens)
-	if resp.StatusCode != 200 || strings.Contains(string(raw), "glpat-fixture") {
+	if resp.StatusCode != 200 || strings.Contains(string(raw), wantToken) {
 		t.Fatalf("token exchange failed or leaked the credential: %d", resp.StatusCode)
 	}
 

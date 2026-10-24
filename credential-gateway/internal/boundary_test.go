@@ -13,7 +13,6 @@ const (
 	module     = "github.com/Agent-Hellboy/mcp-auth"
 	sdk        = module + "/auth-client/go"
 	authServer = module + "/auth-server"
-	opSDK      = "github.com/1password/onepassword-sdk-go"
 )
 
 func imports(t *testing.T, root string) map[string][]string {
@@ -49,15 +48,6 @@ func TestPluginDoesNotImportAuthorizationServer(t *testing.T) {
 	mod, _ := os.ReadFile("../go.mod")
 	if strings.Contains(string(mod), authServer) {
 		t.Fatal("plugin go.mod depends on the authorization server")
-	}
-}
-
-// The 1Password SDK is confined to providers/onepassword.
-func TestOnePasswordSDKIsConfinedToSecretsPackage(t *testing.T) {
-	for _, file := range imports(t, "..")[opSDK] {
-		if !strings.Contains(filepath.ToSlash(file), "providers/onepassword/") {
-			t.Fatalf("1Password SDK imported outside providers/onepassword: %s", file)
-		}
 	}
 }
 
