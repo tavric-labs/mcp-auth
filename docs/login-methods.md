@@ -80,7 +80,7 @@ before an MCP client receives an authorization code or access token:
 ```json
 {"methods": [
   {"id":"company", "type":"oidc", "connector":"keycloak", "subject_prefix":""},
-  {"id":"upstream-demo", "type":"oidc", "connector":"credential-gateway",
+  {"id":"upstream-demo", "type":"oidc", "connector":"gateway-login-demo",
    "resources":["https://mcp.example/credential-demo/mcp"]}
 ]}
 ```
@@ -97,8 +97,8 @@ default method cannot bypass the requirement. An assigned single redirect
 method goes directly to its provider after consent.
 
 In the credential-gateway pattern, that provider's login page collects the
-saved service Login through the user's password manager and validates it with
-the fixed upstream service. The gateway retains the upstream header values
+header values (typed or filled by the browser's password manager) and validates
+them with the fixed upstream service. The gateway retains the upstream header values
 and returns an opaque identity to `mcp-auth`. Only after that provider succeeds
 does `mcp-auth` issue the MCP authorization code and token. The resource server
 validates the MCP token and supplies its retained headers on later requests.
@@ -133,7 +133,7 @@ where each method names the resources it serves:
 - The file cannot be combined with `MCP_AUTH_LOGIN_METHODS_FILE`; in that mode, scope
   methods with `resources` in the methods file itself.
 
-[The credential gateway](credential-gateway.md) uses this to send a header-auth
+[The credential gateway guide](credential-gateway.md) uses this to send a header-auth
 resource to its own sign-in page.
 
 An `oidc` method can wrap a plain OAuth 2.0 connector by requesting scopes

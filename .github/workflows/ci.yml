@@ -21,8 +21,6 @@ jobs:
             path: auth-server
           - name: auth-client
             path: auth-client/go
-          - name: credential-gateway
-            path: credential-gateway
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -131,11 +129,6 @@ jobs:
         working-directory: auth-client/typescript
       - run: npm ci
         working-directory: examples/typescript-mcp
-      - name: Test credential gateway against the authorization server
-        working-directory: credential-gateway
-        env:
-          MCP_AUTH_SRC: ${{ github.workspace }}
-        run: go test -race ./e2e -count=1
       - name: Build authorization server
         working-directory: auth-server
         run: go build -trimpath -o "${{ runner.temp }}/mcp-auth-server" ./cmd/auth-server
@@ -181,22 +174,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build image
         run: docker build --tag mcp-auth-server:ci auth-server
-      - name: Build credential gateway image
-        run: docker build --file credential-gateway/Dockerfile --tag mcp-credential-gateway:ci .
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: mcp-auth-server:ci
-          format: table
-          scanners: vuln,secret,misconfig
-          vuln-type: os,library
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: "1"
-      - name: Scan credential gateway image with Trivy
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: mcp-credential-gateway:ci
           format: table
           scanners: vuln,secret,misconfig
           vuln-type: os,library

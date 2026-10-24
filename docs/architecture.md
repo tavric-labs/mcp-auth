@@ -6,10 +6,10 @@ behavior behind explicit boundaries. The authorization server and SDKs can be
 deployed independently; neither requires MCP tool handlers to know which
 identity provider authenticated the user.
 
-The optional [credential gateway bundle](credential-gateway.md) composes this
-OAuth core and a separate gateway/provider module in one process. The core
-boundaries below still apply; only the optional gateway handles upstream
-secrets. Its deployment hook runs before authorization-code issuance.
+[Resource logins](credential-gateway.md) let a resource use its own sign-in
+endpoints, served by a separate gateway over HTTP. The core boundaries below
+still apply; only that gateway handles upstream secrets, and mcp-auth only ever
+sees an opaque subject.
 
 ## Standards and roles
 

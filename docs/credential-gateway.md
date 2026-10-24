@@ -1,4 +1,4 @@
-# Optional credential gateway
+# Resource logins for a credential gateway
 
 Use the gateway when an upstream MCP server needs a username, password, API token,
 or other authentication headers. MCP clients keep only the gateway's public URL and
@@ -6,10 +6,14 @@ an OAuth bearer token. The first time a client connects, a sign-in page asks the
 person for the header values. From then on the gateway supplies those headers to
 the upstream on every request (POST, GET/SSE and DELETE).
 
-The gateway is **its own service**, next to an unmodified mcp-auth. No identity
-provider is involved for these resources and no vault is configured: the person
-fills the form by hand or with their browser's own password manager. The gateway
-never gives the values back, and mcp-auth never sees them.
+The gateway is **its own service**, next to an unmodified mcp-auth. This repository
+ships no gateway: use [MCP Runtime's `mcp-gateway`](https://github.com/tavric-labs/mcp-runtime)
+in credential mode (`MCP_GATEWAY_MODE=credential`), which `mcp-runtime cluster
+mcp-auth-gateway apply|sync` deploys once for every opted-in server, or any service
+that implements the sign-in endpoints below. No identity provider is involved for
+these resources and no vault is configured: the person fills the form by hand or
+with their browser's own password manager. The gateway never gives the values back,
+and mcp-auth never sees them.
 
 ## Architecture
 
@@ -33,7 +37,7 @@ never gives the values back, and mcp-auth never sees them.
 | Service | Responsibility |
 | --- | --- |
 | `mcp-auth` (`auth-server`) | Consent, PKCE, tokens, refresh and revocation. Routes the gateway's resources to their sign-in through a resource login. Unchanged for every other resource. |
-| `mcp-credential-gateway` | The sign-in endpoints mcp-auth uses (`/login/authorize`, `/approve`, `/token`, `/userinfo`), the in-memory value store, header injection and the fixed upstream proxy. |
+| Credential gateway (`mcp-gateway`, credential mode) | The sign-in endpoints mcp-auth uses (`/login/authorize`, `/approve`, `/token`, `/userinfo`), the in-memory value store, header injection and the fixed upstream proxy. |
 
 Each MCP request makes one extra call from the gateway to mcp-auth's token endpoint,
 for a signed credential-access assertion. That call is what makes revocation take
@@ -69,61 +73,16 @@ authenticating, is unsuitable. Redirects are not followed.
 
 ## Configure the gateway
 
-Start with [config.example.json](../examples/credential-gateway/config.example.json)
-and replace the example hosts. Run `mcp-credential-gateway` with
-`MCP_GATEWAY_CONFIG` set to the file (or `-config`). Mount the config, the
-resource-client RSA key and a session binding key of at least 32 characters
-read-only. Secret contents never belong in `mcp.json`, `.mcp/servers.yaml`, a
-container image or Git.
-
-```json
-{
-  "listen": {"host": "0.0.0.0", "port": 8090},
-  "authorization_server": {"issuer": "https://auth.example.com/mcp-auth"},
-  "session_binding_key_file": "/run/secrets/gateway-session-binding",
-  "form_credentials": {"ttl_seconds": 3600, "max_entries": 1024},
-  "services": [{
-    "id": "gitlab",
-    "resource_url": "https://auth.example.com/gitlab/mcp",
-    "upstream_url": "https://mcp.example.com/gitlab/mcp",
-    "validation_url": "https://mcp.example.com/gitlab/mcp/auth/check",
-    "required_scopes": ["tools:read"],
-    "resource_client": {"client_id": "gitlab-gateway", "key_id": "gateway-1", "private_key_file": "/run/secrets/gitlab-client.pem"},
-    "form_fields": [
-      {"name": "username", "label": "GitLab username"},
-      {"name": "api_token", "label": "Personal access token", "secret": true}
-    ],
-    "headers": [
-      {"name": "X-GitLab-Username", "type": "direct", "field": "username"},
-      {"name": "X-GitLab-PAT-Token", "type": "direct", "field": "api_token"}
-    ]
-  }]
-}
-```
-
-- **`form_fields`** must be exactly the credential fields the `headers` read, so a
-  form can neither omit a value a header needs nor collect one nothing uses. A
-  `label` defaults to the field name; `secret` renders a masked input. A `source`
-  key may be omitted or `"form"`; nothing else is supported.
-- **`headers`** are `direct`, `prefix` (`Bearer` or `Token`) or `basic` (username
-  and password fields). Any valid HTTP header name works. Routing, framing and
-  protocol headers cannot be injected, and neither can `Via`, `Accept-Encoding`,
-  `Last-Event-Id` or `Sec-*`. The person supplies the complete value, for example
-  `Bearer abc` for an `Authorization` header with a `direct` rule.
-- **`form_credentials`**: `ttl_seconds` (default 3600, 60 to 86400) and
-  `max_entries` (default 1024, oldest evicted first).
-- **`credential_cache`**: rendered headers are also cached briefly. Defaults are
-  300 seconds and 1024 entries; the TTL may be 0 to 3600 seconds. A cache entry
-  never outlives the OAuth session.
-
-The gateway's public routes are each service's path (the MCP endpoint), its
-`/login/*` sub-paths and `/.well-known/oauth-protected-resource/<path>`. Route them
-to the gateway's port; preserve streaming on the MCP route.
+The gateway's configuration (services, form fields, header rules, limits, the
+in-memory store) is documented with MCP Runtime, which also derives it from each
+server's `.mcp/servers.yaml`. What mcp-auth needs from it is the contract below: a
+resource client key per service, a sign-in client id `login-<id>` and a subject
+prefix `form-<id>:`.
 
 ## Configure mcp-auth
 
 mcp-auth needs four things per service, all in its existing configuration. Use the
-gateway's two naming conventions, which the gateway also uses: the sign-in client id
+naming conventions the gateway also uses: the sign-in client id
 is `login-<id>` and the subject prefix is `form-<id>:`.
 
 1. **The resource and its scope** in `MCP_AUTH_RESOURCES` and
@@ -179,19 +138,15 @@ The client connects to **`resource_url`**, not the raw upstream URL:
 
 ```bash
 (cd auth-server && go test -race ./... && go vet ./...)
-(cd credential-gateway && MCP_AUTH_SRC=../.. go test -race ./... && go vet ./...)
 ```
 
-The gateway tests cover isolation, injection on all MCP HTTP operations, cache expiry,
-redirects, session binding, revocation, and the sign-in endpoints including forged
-origins, replayed codes, wrong PKCE verifiers and attempt limits. The end-to-end test
-starts the real mcp-auth binary and the gateway as separate HTTP servers and walks the
-whole flow across both: the redirect to the gateway's form, refusal of wrong values,
-the back channel, two people with separate headers, and revocation of one session.
+The resource-login tests cover method selection per resource, state routing through
+the shared callback, refusal of methods without a subject prefix, and coexistence
+with a single connector. The gateway's own tests, including a full flow against a
+live deployment, live with MCP Runtime.
 
-Restrict the upstream route to trusted gateway callers where the network permits; it
-remains authenticated with its required headers. The gateway must be able to reach
-`upstream_url` and `validation_url`, and mcp-auth's token endpoint and signing keys,
-from where it runs. A pod that cannot connect to its own cluster's public address
-needs an in-cluster route for that hostname. mcp-auth must be able to reach the
-gateway's `/login/token` and `/login/userinfo`.
+Restrict the upstream route to trusted gateway callers where the network permits.
+mcp-auth must be able to reach the gateway's `/login/token` and `/login/userinfo`,
+and the gateway must reach mcp-auth's token endpoint and signing keys. A pod that
+cannot connect to its own cluster's public address needs an in-cluster route for
+that hostname.
