@@ -9,7 +9,7 @@ the upstream on every request (POST, GET/SSE and DELETE).
 The gateway is **its own service**, next to an unmodified mcp-auth. This repository
 ships no gateway: use [MCP Runtime's `mcp-gateway`](https://github.com/tavric-labs/mcp-runtime)
 in credential mode (`MCP_GATEWAY_MODE=credential`), which `mcp-runtime cluster
-mcp-auth-gateway apply|sync` deploys once for every opted-in server, or any service
+mcp-auth-gateway apply` deploys once for every opted-in server, or any service
 that implements the sign-in endpoints below. No identity provider is involved for
 these resources and no vault is configured: the person fills the form by hand or
 with their browser's own password manager. The gateway never gives the values back,
@@ -124,7 +124,7 @@ clear anyone's stored values.
 ## Runtime authoring and client configuration
 
 Runtime's `.mcp/servers.yaml` can declare `auth.credentialGateway` for a
-header-mode server, and `mcp-runtime cluster mcp-auth-gateway sync` derives the
+header-mode server, and `mcp-runtime cluster mcp-auth-gateway apply` derives the
 gateway's service entries and the mcp-auth wiring from the pushed servers. See the
 [Runtime credential-form example](https://github.com/tavric-labs/mcp-runtime/tree/examples/onepassword_credential_demo/examples/credential-form-demo).
 
