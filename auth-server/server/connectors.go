@@ -94,6 +94,9 @@ func (c ConnectorConfig) validate(name string, allowInsecure bool) error {
 		"jwks_uri":               c.JWKSURI,
 	} {
 		if value == "" {
+			if field == "jwks_uri" && !c.requiresIDToken() {
+				continue
+			}
 			return fmt.Errorf("connector %q is missing %s", name, field)
 		}
 		parsed, err := url.Parse(value)
@@ -310,7 +313,7 @@ func LoadConnectorsWithOptions(path string, allowInsecure bool) (map[string]Conn
 		// never just because userinfo_endpoint (always optional) is unset —
 		// a connector that already specifies everything it needs must never
 		// make a network call it didn't have to make before this existed.
-		if connector.Issuer != "" && (connector.AuthorizationEndpoint == "" || connector.TokenEndpoint == "" || connector.JWKSURI == "") {
+		if connector.Issuer != "" && (connector.AuthorizationEndpoint == "" || connector.TokenEndpoint == "" || (connector.requiresIDToken() && connector.JWKSURI == "")) {
 			discoveryClient := &http.Client{Timeout: discoveryTimeout}
 			discovered, err := discoverOIDCConfiguration(context.Background(), discoveryClient, connector.Issuer)
 			if err != nil {

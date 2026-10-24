@@ -27,6 +27,16 @@ func (s *Server) loginRegistry() *LoginRegistry {
 	return registry
 }
 
+// loginFlowRegistry is the registry the sign-in page and submission use: the
+// login registry when that is the identity provider, otherwise the registry of
+// resource-scoped methods. The connector callback never uses the latter.
+func (s *Server) loginFlowRegistry() *LoginRegistry {
+	if registry := s.loginRegistry(); registry != nil {
+		return registry
+	}
+	return s.ResourceLogins
+}
+
 // loginRecordKey namespaces a login page id in the store. Consent ids, login
 // ids and upstream states share one table, and an id from one stage must never
 // be accepted at another: a consent id from /authorize, used as a login id,
@@ -106,10 +116,14 @@ func (s *Server) rejectUnboundLogin(w http.ResponseWriter, pending ConsentReques
 // pending request is saved again because consent consumed the one it arrived
 // with.
 func (s *Server) startLogin(w http.ResponseWriter, r *http.Request, registry *LoginRegistry, pending ConsentRequest) {
+	if len(registry.entriesForResource(pending.Request.Resource)) == 0 {
+		redirectError(w, r, pending.Request, "access_denied", "no login method is configured for this resource", s.Config.Issuer, s.Config.AuthorizationResponseIssuer)
+		return
+	}
 	binding := randomID()
 	pending.Request.LoginBinding = HashSecret(binding)
 	pending.ExpiresAt = s.now().Add(s.Config.loginTTL())
-	if entry, ok := registry.single(); ok {
+	if entry, ok := registry.singleForResource(pending.Request.Resource); ok {
 		if _, redirect := entry.Method.(RedirectLoginMethod); redirect {
 			s.beginRedirectLogin(w, r, entry, pending, binding)
 			return
@@ -122,7 +136,7 @@ func (s *Server) startLogin(w http.ResponseWriter, r *http.Request, registry *Lo
 		return
 	}
 	s.setLoginBinding(w, loginID, binding, pending.ExpiresAt)
-	http.Redirect(w, r, s.Config.LoginEndpoint()+"?"+url.Values{"login_id": {loginID}}.Encode(), http.StatusSeeOther)
+	http.Redirect(w, r, s.Config.LoginEndpoint()+"?"+url.Values{"login_id": {loginID}, "resource": {pending.Request.Resource}}.Encode(), http.StatusSeeOther)
 }
 
 // beginRedirectLogin sends the browser to the method's provider. The upstream
@@ -156,7 +170,7 @@ func (s *Server) beginRedirectLogin(w http.ResponseWriter, r *http.Request, entr
 // without consuming it, so an expired or unbound id is only reported when a
 // method is chosen.
 func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
-	registry := s.loginRegistry()
+	registry := s.loginFlowRegistry()
 	if registry == nil {
 		http.NotFound(w, r)
 		return
@@ -166,13 +180,15 @@ func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
 		s.writeExpiredLogin(w)
 		return
 	}
-	s.renderLogin(w, http.StatusOK, registry, loginID, "", "", nil)
+	// The query controls presentation only. Submission and callbacks select
+	// methods using the resource stored with the pending authorization.
+	s.renderLogin(w, http.StatusOK, registry, r.URL.Query().Get("resource"), loginID, "", "", nil)
 }
 
 // loginSubmit handles a chosen method: it starts the provider redirect, or
 // checks the submitted credentials.
 func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
-	registry := s.loginRegistry()
+	registry := s.loginFlowRegistry()
 	if registry == nil {
 		http.NotFound(w, r)
 		return
@@ -200,6 +216,12 @@ func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
 	binding := s.presentedBinding(r, loginID)
 	if !bindingMatches(binding, pending) {
 		s.rejectUnboundLogin(w, pending, "login")
+		return
+	}
+	if _, allowed := registry.lookupForResource(entry.Method.ID(), pending.Request.Resource); !allowed {
+		_ = s.Store.SaveConsentRequest(pending)
+		s.Audit.Event("login", "failure", map[string]any{"method": entry.Method.ID(), "reason": "method_not_allowed_for_resource"})
+		oauthError(w, http.StatusForbidden, "access_denied")
 		return
 	}
 	switch method := entry.Method.(type) {
@@ -278,7 +300,7 @@ func (s *Server) retryLogin(w http.ResponseWriter, registry *LoginRegistry, meth
 	}
 	s.clearLoginBinding(w, oldID)
 	s.setLoginBinding(w, loginID, binding, pending.ExpiresAt)
-	s.renderLogin(w, status, registry, loginID, message, method.ID(), values)
+	s.renderLogin(w, status, registry, pending.Request.Resource, loginID, message, method.ID(), values)
 }
 
 func (s *Server) writeExpiredLogin(w http.ResponseWriter) {
@@ -287,9 +309,9 @@ func (s *Server) writeExpiredLogin(w http.ResponseWriter) {
 	_ = loginTemplate.Execute(w, loginView{Expired: true, Title: "Sign-in request expired"})
 }
 
-func (s *Server) renderLogin(w http.ResponseWriter, status int, registry *LoginRegistry, loginID, message, failedMethod string, submitted map[string]string) {
+func (s *Server) renderLogin(w http.ResponseWriter, status int, registry *LoginRegistry, resource, loginID, message, failedMethod string, submitted map[string]string) {
 	view := loginView{Title: "Sign in", Error: message, LoginID: loginID}
-	for _, entry := range registry.entries {
+	for _, entry := range registry.entriesForResource(resource) {
 		item := loginMethodView{
 			ID: entry.Method.ID(), Label: entry.Method.Label(),
 			Action: s.Config.LoginEndpoint() + "/" + entry.Method.ID(),
@@ -330,6 +352,11 @@ func (s *Server) registryCallback(w http.ResponseWriter, r *http.Request, regist
 		_ = s.Store.SaveConsentRequest(pending)
 		s.Audit.Event("login", "failure", map[string]any{"method": methodID, "reason": "browser_binding_mismatch", "stage": "callback"})
 		http.Error(w, "identity state is invalid or expired", http.StatusBadRequest)
+		return
+	}
+	if _, allowed := registry.lookupForResource(methodID, pending.Request.Resource); !allowed {
+		s.Audit.Event("login", "failure", map[string]any{"method": methodID, "reason": "method_not_allowed_for_resource"})
+		oauthError(w, http.StatusForbidden, "access_denied")
 		return
 	}
 	s.clearLoginBinding(w, state)

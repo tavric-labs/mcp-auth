@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -100,6 +101,9 @@ var loginMethodIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 // LoginEntry registers one method.
 type LoginEntry struct {
 	Method LoginMethod
+	// Resources scopes this method to exact MCP resource URLs. Explicitly
+	// scoped methods replace the unscoped defaults for their resources.
+	Resources []string
 	// SubjectPrefix is prepended to the subject the method returns. Methods
 	// have independent identifier spaces (a Google sub, a GitHub id and an LDAP
 	// uid can be equal strings), so without a prefix two people could share an
@@ -137,6 +141,15 @@ func NewLoginRegistry(entries ...LoginEntry) (*LoginRegistry, error) {
 		if strings.TrimSpace(entry.Method.Label()) == "" {
 			return nil, fmt.Errorf("login method %q needs a label", id)
 		}
+		seen := map[string]bool{}
+		for _, resource := range entry.Resources {
+			u, err := url.Parse(resource)
+			if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.Fragment != "" || u.RawQuery != "" || strings.TrimSpace(resource) != resource || seen[resource] {
+				return nil, fmt.Errorf("login method %q resources must be unique absolute HTTP(S) URLs without userinfo, query or fragment", id)
+			}
+			seen[resource] = true
+		}
+		entry.Resources = append([]string(nil), entry.Resources...)
 		_, redirect := entry.Method.(RedirectLoginMethod)
 		credential, isCredential := entry.Method.(CredentialLoginMethod)
 		switch {
@@ -190,12 +203,69 @@ func (r *LoginRegistry) lookup(id string) (LoginEntry, bool) {
 	return entry, ok
 }
 
-// single returns the only method when exactly one is registered.
-func (r *LoginRegistry) single() (LoginEntry, bool) {
-	if len(r.entries) != 1 {
+// entriesForResource makes an explicit resource assignment an authentication
+// requirement: a user cannot select a weaker default method instead. Methods
+// without resource assignments remain defaults for other resources.
+func (r *LoginRegistry) entriesForResource(resource string) []LoginEntry {
+	var scoped, defaults []LoginEntry
+	for _, entry := range r.entries {
+		if len(entry.Resources) == 0 {
+			defaults = append(defaults, entry)
+			continue
+		}
+		for _, allowed := range entry.Resources {
+			if allowed == resource {
+				scoped = append(scoped, entry)
+				break
+			}
+		}
+	}
+	if len(scoped) > 0 {
+		return scoped
+	}
+	return defaults
+}
+
+// ResourceURLs lists every resource some method is assigned to.
+func (r *LoginRegistry) ResourceURLs() []string {
+	var out []string
+	for _, entry := range r.entries {
+		out = append(out, entry.Resources...)
+	}
+	return out
+}
+
+// servesResource reports whether a method is explicitly assigned to resource.
+// It is nil-safe, so a server with no resource logins answers false.
+func (r *LoginRegistry) servesResource(resource string) bool {
+	if r == nil {
+		return false
+	}
+	for _, entry := range r.entries {
+		for _, allowed := range entry.Resources {
+			if allowed == resource {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (r *LoginRegistry) lookupForResource(id, resource string) (LoginEntry, bool) {
+	for _, entry := range r.entriesForResource(resource) {
+		if entry.Method.ID() == id {
+			return entry, true
+		}
+	}
+	return LoginEntry{}, false
+}
+
+func (r *LoginRegistry) singleForResource(resource string) (LoginEntry, bool) {
+	entries := r.entriesForResource(resource)
+	if len(entries) != 1 {
 		return LoginEntry{}, false
 	}
-	return r.entries[0], true
+	return entries[0], true
 }
 
 // qualify namespaces the identity a method returned. Upstream tokens are not

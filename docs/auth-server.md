@@ -173,6 +173,11 @@ Important settings:
 - `MCP_AUTH_LOGIN_METHODS_FILE`: JSON file that enables [login methods](login-methods.md): Google, GitHub,
   LDAP and OIDC connectors offered together on one login page. It replaces `MCP_AUTH_CONNECTOR`; setting
   both is a startup error.
+- `MCP_AUTH_RESOURCE_LOGINS_FILE`: JSON file of [login methods](login-methods.md#resource-logins-next-to-a-single-connector)
+  that apply only to the resources they name, next to the single `MCP_AUTH_CONNECTOR`. Every other resource keeps
+  the connector's flow, downstream token exchange included. Each method must set `resources` and a non-empty
+  `subject_prefix`. It needs `MCP_AUTH_CONNECTORS_FILE` for the connectors the methods reference, and cannot be
+  combined with `MCP_AUTH_LOGIN_METHODS_FILE`.
 - `MCP_AUTH_LOGIN_TTL`: how long a person has to finish signing in with login methods (default `10m`).
 - `MCP_AUTH_CONNECTOR`: selected connector name. One running process serves exactly one connector and can
   serve several resources with `MCP_AUTH_RESOURCES` — see [Serving multiple resources](#serving-multiple-resources).

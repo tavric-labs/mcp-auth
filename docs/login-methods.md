@@ -70,6 +70,81 @@ Every entry has:
 | `type` | Required. `oidc`, `google`, `github` or `ldap`. |
 | `label` | Button or heading text. Each type has a sensible default. |
 | `subject_prefix` | Prepended to the person's subject. Defaults to `"<id>:"`. See [Subjects](#subjects-from-different-methods-never-collide). |
+| `resources` | Optional array of exact MCP resource URLs. Explicit assignments override the unscoped default methods for those resources. |
+
+## Require a login method for one resource
+
+Use `resources` when a service must validate its own upstream credentials
+before an MCP client receives an authorization code or access token:
+
+```json
+{"methods": [
+  {"id":"company", "type":"oidc", "connector":"keycloak", "subject_prefix":""},
+  {"id":"upstream-demo", "type":"oidc", "connector":"gateway-login-demo",
+   "resources":["https://mcp.example/credential-demo/mcp"]}
+]}
+```
+
+For `credential-demo`, only `upstream-demo` is eligible. The company login
+remains the default for other resources. If multiple methods explicitly name
+the same resource, the user can choose among those methods. With no matching
+assignment and no unscoped default, authorization fails closed.
+
+Assignments use exact URL equality, with no wildcard or prefix matching.
+The pending authorization's stored resource controls method selection on
+submission and callback; editing the picker URL or posting directly to a
+default method cannot bypass the requirement. An assigned single redirect
+method goes directly to its provider after consent.
+
+In the credential-gateway pattern, that provider's login page collects the
+header values (typed or filled by the browser's password manager) and validates
+them with the fixed upstream service. The gateway retains the upstream header values
+and returns an opaque identity to `mcp-auth`. Only after that provider succeeds
+does `mcp-auth` issue the MCP authorization code and token. The resource server
+validates the MCP token and supplies its retained headers on later requests.
+Neither credential values nor vault references belong in this methods file or
+the MCP client's header configuration. The gateway owns credential custody,
+upstream validation, expiry and header injection; this resource assignment is
+the broker's login-routing policy, not a credential vault.
+
+## Resource logins next to a single connector
+
+A deployment that signs everyone in through one connector (`MCP_AUTH_CONNECTOR`)
+can still send particular resources to their own sign-in, without switching to
+login methods mode and without touching the connector's flow for anything else.
+Set `MCP_AUTH_RESOURCE_LOGINS_FILE` to a file with the same `methods` format,
+where each method names the resources it serves:
+
+```json
+{"methods": [
+  {"id": "form-gitlab", "type": "oidc", "connector": "gitlab-login",
+   "subject_prefix": "form-gitlab:", "resources": ["https://auth.example.com/gitlab/mcp"]}
+]}
+```
+
+- A method here must set `resources` and a **non-empty** `subject_prefix`. An empty
+  prefix could mint a subject equal to one the connector issues, letting one
+  sign-in stand in for another.
+- The connectors it references come from `MCP_AUTH_CONNECTORS_FILE`, next to the
+  connector selected by `MCP_AUTH_CONNECTOR`.
+- A redirect method names itself in the upstream `state` (`<method>.<id>`), which
+  is how the shared `/identity/callback` tells its callbacks from the connector's.
+- Every resource the file names must also be in `MCP_AUTH_RESOURCES`.
+- The file cannot be combined with `MCP_AUTH_LOGIN_METHODS_FILE`; in that mode, scope
+  methods with `resources` in the methods file itself.
+
+[The credential gateway guide](credential-gateway.md) uses this to send a header-auth
+resource to its own sign-in page.
+
+An `oidc` method can wrap a plain OAuth 2.0 connector by requesting scopes
+without `openid` and configuring its userinfo endpoint. With explicit
+authorization and token endpoints, this mode does not require OIDC discovery
+or a `jwks_uri`. OIDC connectors still require signing keys and verified ID
+tokens; omitting keys does not downgrade an OIDC login.
+
+Keep subject prefixes disjoint, including when methods serve different
+resources. Use an explicit empty prefix on a migrated existing method only
+when its subjects must remain unchanged.
 
 One method that redirects (for example only Google) skips the picker and goes
 straight to the provider. Two or more, or any LDAP method, show the login

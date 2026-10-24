@@ -17,6 +17,11 @@ import (
 )
 
 type Server struct {
+	// ResourceLogins holds sign-in methods scoped to particular resources when
+	// the identity provider is a single connector rather than a login registry.
+	// A resource with an entry here signs in through it; every other resource
+	// keeps the connector's own flow, downstream token exchange included.
+	ResourceLogins   *LoginRegistry
 	Config           Config
 	Store            Store
 	Keys             *KeyManager
@@ -308,6 +313,10 @@ func (s *Server) finishConsent(w http.ResponseWriter, r *http.Request, consentID
 		s.startLogin(w, r, registry, pending)
 		return
 	}
+	if s.ResourceLogins.servesResource(request.Resource) {
+		s.startLogin(w, r, s.ResourceLogins, pending)
+		return
+	}
 	if interactive, ok := s.IdentityProvider.(InteractiveIdentityProvider); ok {
 		upstreamState := randomID()
 		location, codeVerifier, err := interactive.Begin(r.Context(), IdentityRequest{
@@ -339,6 +348,16 @@ func (s *Server) identityCallback(w http.ResponseWriter, r *http.Request) {
 	if registry := s.loginRegistry(); registry != nil {
 		s.registryCallback(w, r, registry)
 		return
+	}
+	// A redirect login assigned to one resource names itself in the state
+	// ("<method>.<id>"). The connector's own state has no such prefix.
+	if s.ResourceLogins != nil {
+		if methodID, _, found := strings.Cut(r.URL.Query().Get("state"), "."); found {
+			if _, known := s.ResourceLogins.lookup(methodID); known {
+				s.registryCallback(w, r, s.ResourceLogins)
+				return
+			}
+		}
 	}
 	interactive, ok := s.IdentityProvider.(InteractiveIdentityProvider)
 	if !ok {

@@ -6,6 +6,11 @@ behavior behind explicit boundaries. The authorization server and SDKs can be
 deployed independently; neither requires MCP tool handlers to know which
 identity provider authenticated the user.
 
+[Resource logins](credential-gateway.md) let a resource use its own sign-in
+endpoints, served by a separate gateway over HTTP. The core boundaries below
+still apply; only that gateway handles upstream secrets, and mcp-auth only ever
+sees an opaque subject.
+
 ## Standards and roles
 
 The system has three distinct roles. Keeping them distinct is an important MCP
@@ -178,6 +183,7 @@ Choose one login mode per process:
 
 - `MCP_AUTH_CONNECTOR`: one upstream OIDC/OAuth connector, including its
   `upstream_session` or `rfc8693` downstream-token strategy.
+- `MCP_AUTH_RESOURCE_LOGINS_FILE`: sign-in methods for particular resources next to the single connector.
 - `MCP_AUTH_LOGIN_METHODS_FILE`: several login options under one issuer. It
   establishes identity only; downstream access uses external credential
   assertions and resource-side credential resolution.

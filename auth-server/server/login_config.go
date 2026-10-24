@@ -25,9 +25,10 @@ type loginMethodsDocument struct {
 
 // loginCommon is shared by every type.
 type loginCommon struct {
-	ID    string `json:"id"`
-	Type  string `json:"type"`
-	Label string `json:"label"`
+	ID        string   `json:"id"`
+	Type      string   `json:"type"`
+	Label     string   `json:"label"`
+	Resources []string `json:"resources"`
 	// SubjectPrefix overrides the "<id>:" default. An explicit empty string
 	// keeps the provider's own subject, for migrating from a single connector
 	// whose subjects must not change.
@@ -93,6 +94,26 @@ func LoadLoginMethods(path string, options LoginMethodsOptions) (*LoginRegistry,
 		return nil, fmt.Errorf("read login methods file: %w", err)
 	}
 	return ParseLoginMethods(data, options)
+}
+
+// LoadResourceLogins reads sign-in methods for a server whose identity provider
+// is a single connector. Each method must name the resources it serves and must
+// carry a non-empty subject prefix: an empty prefix could mint a subject equal to
+// one the connector issues, letting one sign-in stand in for another.
+func LoadResourceLogins(path string, options LoginMethodsOptions) (*LoginRegistry, error) {
+	registry, err := LoadLoginMethods(path, options)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range registry.entries {
+		if len(entry.Resources) == 0 {
+			return nil, fmt.Errorf("resource login %q must set resources", entry.Method.ID())
+		}
+		if entry.SubjectPrefix == "" {
+			return nil, fmt.Errorf("resource login %q needs a non-empty subject prefix", entry.Method.ID())
+		}
+	}
+	return registry, nil
 }
 
 // ParseLoginMethods builds the registry from the file's contents.
@@ -188,7 +209,7 @@ func ParseLoginMethods(data []byte, options LoginMethodsOptions) (*LoginRegistry
 		if common.SubjectPrefix != nil {
 			prefix = *common.SubjectPrefix
 		}
-		entries = append(entries, LoginEntry{Method: method, SubjectPrefix: prefix})
+		entries = append(entries, LoginEntry{Method: method, SubjectPrefix: prefix, Resources: common.Resources})
 	}
 	return NewLoginRegistry(entries...)
 }

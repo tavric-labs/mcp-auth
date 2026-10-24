@@ -82,6 +82,18 @@ The token sent by the MCP client is valid only for the MCP resource server. It i
 never forwarded to the downstream API; the resource server obtains a separate
 downstream credential through token exchange or the connector's upstream session.
 
+## Optional credential gateway
+
+For header-authenticated upstream MCP servers, mcp-auth supports
+[resource logins](docs/credential-gateway.md): a resource can be sent to its own
+sign-in page, served by a separate gateway such as MCP Runtime's `mcp-gateway`
+in credential mode. mcp-auth sends the browser to the gateway's sign-in page for that
+resource; the page asks for the headers the server declares, validates them at the
+upstream, and keeps them in memory. The client then holds only a bearer token and a
+URL, and the gateway supplies the headers on every request. mcp-auth never sees the
+values, and no identity provider or vault is involved. This repository ships no
+gateway image; the authorization server and SDKs have no gateway dependency.
+
 ## Try it
 
 ```bash
