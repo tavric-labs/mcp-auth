@@ -8,12 +8,13 @@ the upstream on every request (POST, GET/SSE and DELETE).
 
 The gateway is **its own service**, next to an unmodified mcp-auth. This repository
 ships no gateway: use [MCP Runtime's `mcp-gateway`](https://github.com/tavric-labs/mcp-runtime)
-in credential mode (`MCP_GATEWAY_MODE=credential`), which `mcp-runtime cluster
-mcp-auth-gateway apply` deploys once for every opted-in server, or any service
+in credential mode (`MCP_GATEWAY_MODE=credential`), which `mcp-runtime gateway
+apply` deploys once for every opted-in server, or any service
 that implements the sign-in endpoints below. No identity provider is involved for
 these resources and no vault is configured: the person fills the form by hand or
-with their browser's own password manager. The gateway never gives the values back,
-and mcp-auth never sees them.
+with their browser's own password manager. The subject mcp-auth stores is the
+gateway's opaque `form-<id>:` value, not a connector user. The gateway never
+gives the values back, and mcp-auth never sees them.
 
 ## Architecture
 
