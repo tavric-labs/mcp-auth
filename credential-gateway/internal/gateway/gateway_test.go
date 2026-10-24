@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/mappings"
 	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/secrets"
 	. "github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/testutil"
 )
@@ -473,9 +474,8 @@ func TestMappingRemovalAndFailClosed(t *testing.T) {
 	env.WriteMappings(DefaultMappings(env.AS.Issuer())[1:2])
 	time.Sleep(10 * time.Millisecond)
 	status(t, env.Do("POST", mcp, token, Initialize, nil), 403)
-	// invalid file after startup: fail closed
-	env.WriteMappings([]map[string]any{{"issuer": "x", "subject": "y", "service": "gitlab", "fields": map[string]string{"username": "not-a-ref"}}})
-	time.Sleep(10 * time.Millisecond)
+	// the store becomes unavailable after startup: fail closed
+	env.Store.SetErr(mappings.ErrUnavailable)
 	body := status(t, env.Do("POST", mcp, token, Initialize, nil), 503)
 	if JSONField(body, "error") != "mapping_unavailable" {
 		t.Fatal(body)

@@ -67,7 +67,7 @@ Every entry has:
 | Field | Meaning |
 | --- | --- |
 | `id` | Required. 1-32 lowercase letters, digits or hyphens. Used in the form action and the upstream state. |
-| `type` | Required. `oidc`, `google`, `github`, `ldap` or `static`. |
+| `type` | Required. `oidc`, `google`, `github` or `ldap`. |
 | `label` | Button or heading text. Each type has a sensible default. |
 | `subject_prefix` | Prepended to the person's subject. Defaults to `"<id>:"`. See [Subjects](#subjects-from-different-methods-never-collide). |
 | `resources` | Optional array of exact MCP resource URLs. Explicit assignments override the unscoped default methods for those resources. |
@@ -154,34 +154,6 @@ subject. The GitHub access token is used for the lookups and then discarded.
 | `client_secret_env` | Required. |
 | `allowed_orgs` | Optional. Admits only **active** members of one of these organizations (a pending invitation is not membership). Requests the `read:org` scope. |
 | `base_url`, `api_url` | Optional. Point at GitHub Enterprise Server. HTTPS only. |
-
-### `static`
-
-Signs in one fixed subject with **no identity provider and no typed values**.
-Use it for a header-authenticated MCP server whose gateway supplies the
-upstream headers from a vault: the MCP client does standard OAuth, holds only
-the bearer token, and its `mcp.json` is the URL alone. After consent the person
-sees a single button; the resource's pre-code check then reads the mapped vault
-values, tests them at the upstream, and denies the authorization if they fail.
-
-```json
-{"methods": [
-  {"id": "company", "type": "oidc", "connector": "keycloak", "subject_prefix": ""},
-  {"id": "vault", "type": "static", "subject": "gitlab-shared",
-   "resources": ["https://mcp.example.com/gitlab/mcp"]}
-]}
-```
-
-| Field | Meaning |
-| --- | --- |
-| `subject` | Required. The fixed subject, without whitespace or control characters, at most 256 bytes. The mapping's `subject` is `<subject_prefix><subject>`, here `vault:gitlab-shared`. |
-| `resources` | Required for this type. A static method is refused when unscoped, so it can never become a default login. |
-
-This method proves nothing about who the person is. Every sign-in on its
-resources shares one subject and therefore one upstream credential set, and the
-only gate is the upstream's own validation of the vault values. Use it for a
-single shared service account, not for per-person access; use an identity
-method with per-subject mappings when people need separate credentials.
 
 ### `ldap`
 

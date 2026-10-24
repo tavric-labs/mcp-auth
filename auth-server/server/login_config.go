@@ -58,11 +58,6 @@ type loginGitHubEntry struct {
 	APIURL          string   `json:"api_url"`
 }
 
-type loginStaticEntry struct {
-	loginCommon
-	Subject string `json:"subject"`
-}
-
 type loginLDAPEntry struct {
 	loginCommon
 	URL              string            `json:"url"`
@@ -181,19 +176,10 @@ func ParseLoginMethods(data []byte, options LoginMethodsOptions) (*LoginRegistry
 					UserDNTemplate: entry.UserDNTemplate, SubjectAttribute: entry.SubjectAttribute,
 					Claims: entry.Claims, UsernameLabel: entry.UsernameLabel, PasswordLabel: entry.PasswordLabel,
 				}, options.AllowInsecure)
-			case "static":
-				var entry loginStaticEntry
-				if err := strictJSON(raw, &entry); err != nil {
-					return nil, err
-				}
-				if len(common.Resources) == 0 {
-					return nil, errors.New("a static method must be scoped with resources: it signs in one fixed subject with no identity check")
-				}
-				return NewStaticLoginMethod(common.ID, defaultLabel(label, "Continue with the vault credential"), entry.Subject)
 			case "":
-				return nil, errors.New("type is required (oidc, google, github, ldap or static)")
+				return nil, errors.New("type is required (oidc, google, github or ldap)")
 			default:
-				return nil, fmt.Errorf("unknown type %q (supported: oidc, google, github, ldap, static)", common.Type)
+				return nil, fmt.Errorf("unknown type %q (supported: oidc, google, github, ldap)", common.Type)
 			}
 		}()
 		if err != nil {

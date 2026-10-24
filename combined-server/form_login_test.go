@@ -1,6 +1,7 @@
 package combinedserver
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -31,6 +32,18 @@ import (
 // page asks for the two header values, the gateway validates them at the
 // upstream before any code is issued, keeps them in memory under a random
 // subject, and sends them on every later request. No vault is configured.
+// companyLogin stands in for the deployment's existing login on another resource.
+type companyLogin struct{}
+
+func (companyLogin) ID() string    { return "company" }
+func (companyLogin) Label() string { return "Company login" }
+func (companyLogin) Fields() []server.LoginField {
+	return []server.LoginField{{Name: "username", Label: "Username"}}
+}
+func (companyLogin) Authenticate(context.Context, server.IdentityRequest, server.LoginAttempt) (server.Identity, error) {
+	return server.Identity{Subject: "someone"}, nil
+}
+
 func TestFormLoginNeedsNoIdentityProviderOrVault(t *testing.T) { formLoginFlow(t, true) }
 
 // TestFormLoginCoexistsWithASingleConnector keeps the deployment's identity
@@ -85,11 +98,7 @@ func formLoginFlowWith(t *testing.T, registryMode bool, wantUser, wantToken stri
 	// company method serves another resource, or a single connector.
 	var identity server.IdentityProvider = server.LocalIdentityProvider{Subject: "alice"}
 	if registryMode {
-		company, err := server.NewStaticLoginMethod("company", "Company login", "someone")
-		if err != nil {
-			t.Fatal(err)
-		}
-		registry, err := server.NewLoginRegistry(server.LoginEntry{Method: company, SubjectPrefix: "company:", Resources: []string{other}})
+		registry, err := server.NewLoginRegistry(server.LoginEntry{Method: companyLogin{}, SubjectPrefix: "company:", Resources: []string{other}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -136,7 +145,7 @@ func formLoginFlowWith(t *testing.T, registryMode bool, wantUser, wantToken stri
 			},
 		}},
 	})
-	gate, err := credentialgateway.OpenWithProviders(configFile, "test", nil)
+	gate, err := credentialgateway.Open(configFile, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,5 +266,37 @@ func formLoginFlowWith(t *testing.T, registryMode bool, wantUser, wantToken stri
 	anon.Body.Close()
 	if anon.StatusCode != 401 {
 		t.Fatalf("an anonymous request reached the gateway: %d", anon.StatusCode)
+	}
+
+	// Refresh keeps the stored header values: the next token still gets them.
+	callWith := func(access string) int {
+		req, _ := http.NewRequest("POST", gateHTTP.URL+"/gitlab/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`))
+		req.Header.Set("Authorization", "Bearer "+access)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	resp, err = http.PostForm(issuer+"/token", url.Values{"grant_type": {"refresh_token"}, "client_id": {"client"}, "refresh_token": {tokens["refresh_token"].(string)}, "resource": {resource}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refreshed map[string]any
+	json.NewDecoder(resp.Body).Decode(&refreshed)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || callWith(refreshed["access_token"].(string)) != 200 {
+		t.Fatalf("a refreshed token lost the stored header values: token status %d", resp.StatusCode)
+	}
+
+	// Revoking the session stops the next request even though values are stored.
+	resp, err = http.PostForm(issuer+"/revoke", url.Values{"client_id": {"client"}, "token": {refreshed["refresh_token"].(string)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got := callWith(refreshed["access_token"].(string)); got != 401 {
+		t.Fatalf("a revoked session still reached the upstream: %d", got)
 	}
 }

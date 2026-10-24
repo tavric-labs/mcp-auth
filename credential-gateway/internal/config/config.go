@@ -37,12 +37,7 @@ type file struct {
 	} `json:"authorization_server"`
 	PublicPathPrefix      string `json:"public_path_prefix"`
 	SessionBindingKeyFile string `json:"session_binding_key_file"`
-	MappingsFile          string `json:"mappings_file"`
-	Provider              struct {
-		Type    string          `json:"type"`
-		Options json.RawMessage `json:"options"`
-	} `json:"provider"`
-	CredentialCache struct {
+	CredentialCache       struct {
 		TTLSeconds *float64 `json:"ttl_seconds"`
 		MaxEntries int      `json:"max_entries"`
 	} `json:"credential_cache"`
@@ -67,8 +62,8 @@ type file struct {
 			PrivateKeyFile string `json:"private_key_file"`
 		} `json:"resource_client"`
 		Headers []headers.Raw `json:"headers"`
-		// Source is "vault" (default: mapped vault references) or "form"
-		// (values the person submits at sign-in, kept in memory).
+		// Source may be omitted or "form": header values the person submits at
+		// sign-in, kept in memory. No other source is supported.
 		Source     string `json:"source"`
 		FormFields []struct {
 			Name   string `json:"name"`
@@ -85,11 +80,8 @@ type ResourceClient struct {
 	PrivateKey *rsa.PrivateKey
 }
 
-// Credential sources for a service.
-const (
-	SourceVault = "vault"
-	SourceForm  = "form"
-)
+// SourceForm is the only credential source: header values submitted at sign-in.
+const SourceForm = "form"
 
 var formFieldRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
 
@@ -123,20 +115,14 @@ type Config struct {
 	ASTimeout             time.Duration
 	PublicPathPrefix      string
 	SessionKey            []byte
-	MappingsFile          string
-	ProviderType          string
-	ProviderOptions       json.RawMessage
 	CacheTTL              time.Duration
 	CacheMaxEntries       int
 	MaxRequestBytes       int64
 	ConnectTimeout        time.Duration
 	ResponseHeaderTimeout time.Duration
 	Services              []Service
-	// HasVaultServices is true when any service reads mapped vault references,
-	// which is what requires a provider and a mappings file.
-	HasVaultServices bool
-	FormTTL          time.Duration
-	FormMaxEntries   int
+	FormTTL               time.Duration
+	FormMaxEntries        int
 }
 
 // Load reads and validates the configuration file at path.
@@ -177,8 +163,7 @@ func Parse(data []byte) (*Config, error) {
 	if err := dec.Decode(&f); err != nil {
 		return nil, errors.New("configuration is not valid JSON of the expected shape")
 	}
-	c := &Config{AllowInsecureHTTP: f.AllowInsecureHTTP, MappingsFile: f.MappingsFile,
-		PublicPathPrefix: f.PublicPathPrefix, ProviderType: f.Provider.Type, ProviderOptions: f.Provider.Options}
+	c := &Config{AllowInsecureHTTP: f.AllowInsecureHTTP, PublicPathPrefix: f.PublicPathPrefix}
 	var err error
 
 	issuer, err := checkURL(f.AuthorizationServer.Issuer, "authorization_server.issuer", c.AllowInsecureHTTP)
@@ -314,24 +299,15 @@ func Parse(data []byte) (*Config, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Every service collects its header values at sign-in. "source" may be
+		// omitted or "form"; nothing else is supported.
 		source := s.Source
-		if source == "" {
-			source = SourceVault
+		if source != "" && source != SourceForm {
+			return nil, fmt.Errorf("%s.source must be %q or omitted", here, SourceForm)
 		}
-		var formFields []FormField
-		switch source {
-		case SourceVault:
-			if len(s.FormFields) > 0 {
-				return nil, fmt.Errorf("%s.form_fields is only valid for source %q", here, SourceForm)
-			}
-			c.HasVaultServices = true
-		case SourceForm:
-			formFields, err = parseFormFields(s.FormFields, specs, here)
-			if err != nil {
-				return nil, err
-			}
-		default:
-			return nil, fmt.Errorf("%s.source must be %q or %q", here, SourceVault, SourceForm)
+		formFields, err := parseFormFields(s.FormFields, specs, here)
+		if err != nil {
+			return nil, err
 		}
 		path := strings.TrimRight(resource.Path, "/")
 		if path == "" {
@@ -352,16 +328,9 @@ func Parse(data []byte) (*Config, error) {
 			RequiredScopes: s.RequiredScopes,
 			Client:         ResourceClient{ClientID: s.ResourceClient.ClientID, KeyID: s.ResourceClient.KeyID, PrivateKey: priv},
 			Headers:        specs,
-			Source:         source,
+			Source:         SourceForm,
 			FormFields:     formFields,
 		})
-	}
-	if c.HasVaultServices {
-		if c.MappingsFile == "" || c.ProviderType == "" || len(c.ProviderOptions) == 0 {
-			return nil, errors.New("mappings_file and provider.type/options are required for vault services")
-		}
-	} else if c.MappingsFile != "" || c.ProviderType != "" || len(c.ProviderOptions) != 0 {
-		return nil, errors.New("mappings_file and provider are only valid when a service uses the vault source")
 	}
 	return c, nil
 }
@@ -381,18 +350,6 @@ func parseRSAKey(text string) (*rsa.PrivateKey, error) {
 		return key, nil
 	}
 	return nil, errors.New("private key is not a valid RSA key")
-}
-
-// RequiredFields maps each vault service id to the credential fields its
-// headers read. Form services have no mapping to validate.
-func (c *Config) RequiredFields() map[string][]string {
-	out := make(map[string][]string, len(c.Services))
-	for _, s := range c.Services {
-		if s.Source == SourceVault {
-			out[s.ID] = headers.RequiredFields(s.Headers)
-		}
-	}
-	return out
 }
 
 // parseFormFields requires the sign-in inputs to be exactly the credential

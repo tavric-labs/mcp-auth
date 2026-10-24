@@ -31,7 +31,6 @@ import (
 	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/config"
 	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/credentials"
 	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/gateway"
-	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/mappings"
 	. "github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/testutil"
 )
 
@@ -52,7 +51,6 @@ type stack struct {
 	upstream *FakeUpstream
 	resolver *FakeResolver
 	gateway  *httptest.Server
-	mapFile  string
 }
 
 func freePort(t *testing.T) int {
@@ -130,21 +128,17 @@ func newStack(t *testing.T) *stack {
 		s.resolver.Values[Ref(u, "gitlab", "username")] = u + "-gitlab"
 		s.resolver.Values[Ref(u, "gitlab", "api_token")] = "glpat-" + u + "-fake"
 	}
-	m := DefaultMappings(s.issuer)[:2]
-	data, _ := json.Marshal(map[string]any{"mappings": m})
-	s.mapFile = filepath.Join(dir, "mappings.json")
-	_ = os.WriteFile(s.mapFile, data, 0o600)
+	store := &MapStore{}
+	store.Replace(DefaultMappings(s.issuer)[:2])
 	_ = os.WriteFile(filepath.Join(dir, "session.key"), []byte(strings.Repeat("k", 48)), 0o600)
-	_ = os.WriteFile(filepath.Join(dir, "op.token"), []byte("ops_fake"), 0o600)
 	raw, _ := json.Marshal(map[string]any{
 		"allow_insecure_http":      true,
 		"authorization_server":     map[string]any{"issuer": s.issuer},
 		"session_binding_key_file": filepath.Join(dir, "session.key"),
-		"mappings_file":            s.mapFile,
-		"provider":                 map[string]any{"type": "vault", "options": map[string]any{"mode": "service_account", "service_account_token_file": filepath.Join(dir, "op.token")}},
 		"services": []any{map[string]any{
 			"id": "gitlab", "resource_url": resource, "upstream_url": s.upstream.Server.URL + "/api/v4/mcp_server", "validation_url": s.upstream.Server.URL + "/auth/check",
 			"required_scopes": []string{"gitlab:use"},
+			"form_fields":     []any{map[string]any{"name": "username"}, map[string]any{"name": "api_token", "secret": true}},
 			"resource_client": map[string]any{"client_id": "gitlab-plugin", "key_id": "rc-1", "private_key_file": filepath.Join(dir, "rc-private.pem")},
 			"headers": []any{
 				map[string]any{"name": "X-GitLab-Username", "type": "direct", "field": "username"},
@@ -153,10 +147,6 @@ func newStack(t *testing.T) *stack {
 		}},
 	})
 	cfg, err := config.Parse(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	store, err := mappings.NewFileStore(cfg.MappingsFile, cfg.RequiredFields())
 	if err != nil {
 		t.Fatal(err)
 	}

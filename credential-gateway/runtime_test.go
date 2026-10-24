@@ -8,11 +8,19 @@ import (
 	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/mappings"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 )
+
+// aliceOnly maps one identity to one service, like a table of approved bindings.
+type aliceOnly struct{}
+
+func (aliceOnly) Lookup(issuer, subject, service string) (*mappings.Mapping, error) {
+	if issuer != "https://auth" || subject != "alice" || service != "demo" {
+		return nil, nil
+	}
+	return &mappings.Mapping{Issuer: issuer, Subject: subject, Service: service, Version: "v1", Refs: map[string]string{"password": "test://item/password"}}, nil
+}
 
 type testProvider struct {
 	value string
@@ -36,15 +44,9 @@ func TestPreflightRejectsWrongCredentialsAndAlwaysChecksFresh(t *testing.T) {
 		w.WriteHeader(204)
 	}))
 	defer upstream.Close()
-	file := filepath.Join(t.TempDir(), "mappings.json")
-	os.WriteFile(file, []byte(`{"mappings":[{"issuer":"https://auth","subject":"alice","service":"demo","fields":{"password":"test://vault/item/password"}}]}`), 0600)
-	store, err := mappings.NewFileStore(file, map[string][]string{"demo": {"password"}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	provider := &testProvider{value: "wrong"}
 	cfg := &config.Config{Issuer: "https://auth", ConnectTimeout: time.Second, ResponseHeaderTimeout: time.Second, Services: []config.Service{{ID: "demo", ResourceURL: "https://mcp/demo/mcp", UpstreamURL: upstream.URL + "/mcp", ValidationURL: upstream.URL + "/check", Headers: []headers.Spec{{Name: "X-Password", Kind: headers.Direct, Field: "password"}}}}}
-	run := newRuntime(cfg, &credentials.Service{Mappings: store, Resolver: provider, TTL: time.Hour, Max: 5}, provider.Ready)
+	run := newRuntime(cfg, &credentials.Service{Mappings: aliceOnly{}, Resolver: provider, TTL: time.Hour, Max: 5}, provider.Ready)
 	if run.CheckAuthorization(context.Background(), "https://mcp/demo/mcp", "alice") == nil {
 		t.Fatal("bad credentials authorized")
 	}

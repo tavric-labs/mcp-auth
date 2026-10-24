@@ -5,7 +5,6 @@ package credentialgateway
 import (
 	"context"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"io"
@@ -19,18 +18,7 @@ import (
 	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/formstore"
 	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/gateway"
 	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/headers"
-	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/mappings"
-	"github.com/Agent-Hellboy/mcp-auth/credential-gateway/internal/secrets"
 )
-
-type Resolver = secrets.Resolver
-
-// ProviderFactory is the extension boundary for another vault implementation.
-// Only its factory and reference validator need vendor-specific knowledge.
-type ProviderFactory struct {
-	New            func(json.RawMessage, string) (Resolver, error)
-	ValidReference func(string) bool
-}
 
 type Resource struct {
 	ID, URL, ClientID, KeyID string
@@ -53,47 +41,17 @@ var (
 	ErrUnavailable = errors.New("upstream validation unavailable")
 )
 
-// Open loads a gateway that serves form-source services: header values a person
-// submits at sign-in. It registers no vault provider. A deployment that reads
-// credentials from a vault embeds the gateway and passes its own provider to
-// OpenWithProviders.
+// Open loads the gateway. Every service collects its header values at sign-in
+// and keeps them in memory; there is no vault or mapping file.
 func Open(path, version string) (*Runtime, error) {
-	return OpenWithProviders(path, version, nil)
-}
-
-func OpenWithProviders(path, version string, providers map[string]ProviderFactory) (*Runtime, error) {
 	cfg, err := config.Load(path)
 	if err != nil {
 		return nil, err
 	}
-	route := &router{
-		forms:        &formstore.Store{TTL: cfg.FormTTL, Max: cfg.FormMaxEntries},
-		formServices: map[string]bool{},
-	}
-	for _, s := range cfg.Services {
-		if s.Source == config.SourceForm {
-			route.formServices[s.ID] = true
-		}
-	}
-	// A provider and a mappings file exist only when some service reads the vault.
-	if cfg.HasVaultServices {
-		factory, ok := providers[cfg.ProviderType]
-		if !ok || factory.New == nil || factory.ValidReference == nil {
-			return nil, errors.New("credential provider is not registered")
-		}
-		resolver, err := factory.New(cfg.ProviderOptions, version)
-		if err != nil {
-			return nil, err
-		}
-		store, err := mappings.NewValidatedFileStore(cfg.MappingsFile, cfg.RequiredFields(), factory.ValidReference)
-		if err != nil {
-			return nil, err
-		}
-		route.vault, route.resolver = store, resolver
-	}
-	creds := &credentials.Service{Mappings: route, Resolver: route, TTL: cfg.CacheTTL, Max: cfg.CacheMaxEntries}
-	runtime := newRuntime(cfg, creds, route.Ready)
-	runtime.forms = route.forms
+	forms := &formstore.Store{TTL: cfg.FormTTL, Max: cfg.FormMaxEntries}
+	creds := &credentials.Service{Mappings: forms, Resolver: forms, TTL: cfg.CacheTTL, Max: cfg.CacheMaxEntries}
+	runtime := newRuntime(cfg, creds, forms.Ready)
+	runtime.forms = forms
 	return runtime, nil
 }
 
@@ -118,8 +76,8 @@ func (r *Runtime) Resources() []Resource {
 }
 
 // CheckAuthorization runs after sign-in and before code issuance. Every new
-// OAuth authorization resolves the credentials afresh (the approved vault
-// mapping, or the values just submitted at sign-in) and sends their rendered
+// OAuth authorization resolves the values just submitted at sign-in afresh and
+// sends their rendered
 // headers to a fixed same-origin GET validation endpoint. A cache hit from an
 // older login cannot skip either check. Unmanaged resources retain their
 // normal OAuth behavior.

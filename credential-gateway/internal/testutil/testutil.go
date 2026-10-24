@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -269,17 +271,66 @@ func Ref(user, service, field string) string {
 	return fmt.Sprintf("op://Org-MCP/%s-%s/%s", service, user, field)
 }
 
+// MapStore is an in-memory mappings.Store for tests. The shipped store is the
+// form store; this one lets a test choose exactly which identities have values.
+type MapStore struct {
+	mu  sync.Mutex
+	m   map[[3]string]*mappings.Mapping
+	err error
+}
+
+// SetErr makes every lookup fail with err, as an unavailable store would.
+func (s *MapStore) SetErr(err error) {
+	s.mu.Lock()
+	s.err = err
+	s.mu.Unlock()
+}
+
+// Replace sets the whole mapping table from entries shaped like DefaultMappings.
+func (s *MapStore) Replace(entries []map[string]any) {
+	table := map[[3]string]*mappings.Mapping{}
+	for _, e := range entries {
+		refs, _ := e["fields"].(map[string]string)
+		names := make([]string, 0, len(refs))
+		for name := range refs {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		hash := sha256.New()
+		for _, name := range names {
+			hash.Write([]byte(name + "=" + refs[name] + "\n"))
+		}
+		issuer, subject, service := e["issuer"].(string), e["subject"].(string), e["service"].(string)
+		table[[3]string{issuer, subject, service}] = &mappings.Mapping{
+			Issuer: issuer, Subject: subject, Service: service, Refs: refs, Version: hex.EncodeToString(hash.Sum(nil))[:16],
+		}
+	}
+	s.mu.Lock()
+	s.m = table
+	s.mu.Unlock()
+}
+
+// Lookup implements mappings.Store.
+func (s *MapStore) Lookup(issuer, subject, service string) (*mappings.Mapping, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.m[[3]string{issuer, subject, service}], nil
+}
+
 // Env is a complete wired plugin with fakes.
 type Env struct {
-	T            testing.TB
-	AS           *FakeAS
-	Upstream     *FakeUpstream
-	Resolver     *FakeResolver
-	Creds        *credentials.Service
-	Config       *config.Config
-	Gateway      *httptest.Server
-	MappingsFile string
-	Clock        *Clock
+	T        testing.TB
+	AS       *FakeAS
+	Upstream *FakeUpstream
+	Resolver *FakeResolver
+	Creds    *credentials.Service
+	Config   *config.Config
+	Gateway  *httptest.Server
+	Store    *MapStore
+	Clock    *Clock
 }
 
 // Clock is a settable clock for cache-expiry tests.
@@ -318,11 +369,15 @@ func DefaultMappings(issuer string) []map[string]any {
 	}
 }
 
-func (e *Env) WriteMappings(m []map[string]any) {
-	data, _ := json.Marshal(map[string]any{"mappings": m})
-	if err := os.WriteFile(e.MappingsFile, data, 0o600); err != nil {
-		e.T.Fatal(err)
+// WriteMappings replaces the table the gateway looks identities up in.
+func (e *Env) WriteMappings(m []map[string]any) { e.Store.Replace(m) }
+
+func formFields(names ...string) []any {
+	out := make([]any, 0, len(names))
+	for _, n := range names {
+		out = append(out, map[string]any{"name": n, "secret": n != "username"})
 	}
+	return out
 }
 
 // ConfigMutator edits the raw configuration before it is parsed.
@@ -350,8 +405,7 @@ func NewEnv(t testing.TB, mutate ...ConfigMutator) *Env {
 		}
 	}
 	must(os.WriteFile(filepath.Join(dir, "session.key"), []byte(strings.Repeat("k", 48)), 0o600))
-	must(os.WriteFile(filepath.Join(dir, "op.token"), []byte(Sentinel), 0o600))
-	env := &Env{T: t, AS: as, Upstream: up, Resolver: &FakeResolver{Values: values}, MappingsFile: filepath.Join(dir, "mappings.json"),
+	env := &Env{T: t, AS: as, Upstream: up, Resolver: &FakeResolver{Values: values}, Store: &MapStore{},
 		Clock: &Clock{t: time.Now()}}
 	env.WriteMappings(DefaultMappings(as.Issuer()))
 
@@ -359,20 +413,18 @@ func NewEnv(t testing.TB, mutate ...ConfigMutator) *Env {
 		"allow_insecure_http":      true,
 		"authorization_server":     map[string]any{"issuer": as.Issuer()},
 		"session_binding_key_file": filepath.Join(dir, "session.key"),
-		"mappings_file":            env.MappingsFile,
-		"provider":                 map[string]any{"type": "vault", "options": map[string]any{"mode": "service_account", "service_account_token_file": filepath.Join(dir, "op.token")}},
 		"credential_cache":         map[string]any{"ttl_seconds": 300, "max_entries": 16},
 		"limits":                   map[string]any{"max_request_bytes": 1 << 20},
 		"services": []any{
 			map[string]any{"id": "gitlab", "resource_url": GitLabResource, "upstream_url": up.Server.URL + "/api/v4/mcp", "validation_url": up.Server.URL + "/auth/check",
-				"required_scopes": []string{"gitlab:use"},
+				"required_scopes": []string{"gitlab:use"}, "form_fields": formFields("username", "api_token"),
 				"resource_client": map[string]any{"client_id": "gitlab-plugin", "key_id": "k1", "private_key_file": gitlabKey},
 				"headers": []any{
 					map[string]any{"name": "X-GitLab-Username", "type": "direct", "field": "username"},
 					map[string]any{"name": "X-GitLab-PAT-Token", "type": "direct", "field": "api_token"},
 				}},
 			map[string]any{"id": "gerrit", "resource_url": GerritResource, "upstream_url": up.Server.URL + "/gerrit/mcp", "validation_url": up.Server.URL + "/auth/check",
-				"required_scopes": []string{"gitlab:use"},
+				"required_scopes": []string{"gitlab:use"}, "form_fields": formFields("username", "http_password"),
 				"resource_client": map[string]any{"client_id": "gerrit-plugin", "key_id": "k2", "private_key_file": gerritKey},
 				"headers": []any{
 					map[string]any{"name": "Authorization", "type": "basic", "username_field": "username", "password_field": "http_password"},
@@ -388,11 +440,7 @@ func NewEnv(t testing.TB, mutate ...ConfigMutator) *Env {
 		t.Fatal(err)
 	}
 	env.Config = cfg
-	store, err := mappings.NewFileStore(cfg.MappingsFile, cfg.RequiredFields())
-	if err != nil {
-		t.Fatal(err)
-	}
-	env.Creds = &credentials.Service{Mappings: store, Resolver: env.Resolver, TTL: cfg.CacheTTL, Max: cfg.CacheMaxEntries, Now: env.Clock.Now}
+	env.Creds = &credentials.Service{Mappings: env.Store, Resolver: env.Resolver, TTL: cfg.CacheTTL, Max: cfg.CacheMaxEntries, Now: env.Clock.Now}
 	env.Gateway = httptest.NewServer(gateway.New(cfg, env.Creds, env.Resolver.Ready, nil))
 	t.Cleanup(env.Gateway.Close)
 	return env
