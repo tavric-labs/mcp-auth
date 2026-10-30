@@ -13,7 +13,9 @@ import (
 )
 
 type Config struct {
-	Issuer               string
+	Issuer string
+	// Resources is the audience allowlist. Nil is unconfigured; a non-nil
+	// empty list permits startup while denying every resource.
 	Resources            []string
 	ListenAddr           string
 	AccessTokenTTL       time.Duration
@@ -106,7 +108,7 @@ type Config struct {
 func (c *Config) Validate() error {
 	c.Issuer = strings.TrimRight(c.Issuer, "/")
 	resources := c.configuredResources()
-	if c.Issuer == "" || len(resources) == 0 {
+	if c.Issuer == "" || c.Resources == nil {
 		return errors.New("issuer and resources are required")
 	}
 	issuer, err := url.Parse(c.Issuer)
@@ -319,9 +321,14 @@ func (c Config) loginTTL() time.Duration {
 }
 
 func ConfigFromEnv() Config {
+	resourceFallback := []string{"http://localhost:8081/mcp"}
+	if _, configured := os.LookupEnv("MCP_AUTH_RESOURCES"); configured {
+		// An explicit empty allowlist must never enable the development audience.
+		resourceFallback = []string{}
+	}
 	return Config{
 		Issuer:                      env("MCP_AUTH_ISSUER", "http://localhost:8080"),
-		Resources:                   csvEnv("MCP_AUTH_RESOURCES", []string{"http://localhost:8081/mcp"}),
+		Resources:                   csvEnv("MCP_AUTH_RESOURCES", resourceFallback),
 		ListenAddr:                  env("MCP_AUTH_LISTEN_ADDR", ":8080"),
 		AccessTokenTTL:              durationEnv("MCP_AUTH_ACCESS_TOKEN_TTL", 10*time.Minute),
 		RefreshTokenTTL:             durationEnv("MCP_AUTH_REFRESH_TOKEN_TTL", 24*time.Hour),
