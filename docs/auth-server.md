@@ -166,6 +166,11 @@ Important settings:
   without restricting network access to the proxy lets any caller that can
   reach the process satisfy the HTTPS requirement by setting one header.
 - `MCP_AUTH_RESOURCES`: comma-separated resource allow-list placed in `aud`.
+  An explicitly empty value starts with no permitted resources: discovery,
+  readiness and JWKS remain available, while resource authorization and token
+  issuance are denied. An unset variable retains the local-development default
+  `http://localhost:8081/mcp`; production must set the value explicitly. Go
+  embedders use a non-nil empty `Config.Resources` slice for the empty allowlist.
 - `MCP_AUTH_PRIVATE_KEY_FILE`: PEM RSA key path. Local mode generates an ephemeral test key.
 - `MCP_AUTH_STORE`: `memory` for tests/local development or `sqlite` for durable single-node deployments.
 - `MCP_AUTH_DATABASE_URL`: SQLite path when `MCP_AUTH_STORE=sqlite`.

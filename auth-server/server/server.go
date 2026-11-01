@@ -59,7 +59,7 @@ func NewServer(config Config, store Store, identityProvider IdentityProvider, ex
 }
 
 func NewServerWithKeyProvider(config Config, store Store, identityProvider IdentityProvider, exchanger TokenExchanger, keyProvider KeyProvider, auditWriter io.Writer) (*Server, error) {
-	if config.Issuer == "" || len(config.configuredResources()) == 0 {
+	if config.Issuer == "" || config.Resources == nil {
 		return nil, errors.New("issuer and resources are required")
 	}
 	if store == nil {
