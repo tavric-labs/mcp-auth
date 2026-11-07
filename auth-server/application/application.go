@@ -24,16 +24,9 @@ func Open(config server.Config) (*server.Server, func(), error) {
 		return nil, nil, err
 	}
 	fail := func(err error) (*server.Server, func(), error) { closeStore(); return nil, nil, err }
-	config, identity, exchanger, err := buildProviders(config, store)
-	if err != nil {
-		return fail(err)
-	}
-	auth, err := server.NewServer(config, store, identity, exchanger, os.Stderr)
-	if err != nil {
-		return fail(err)
-	}
+	var logins *server.LoginRegistry
 	if config.ResourceLoginsFile != "" {
-		logins, err := server.LoadResourceLogins(config.ResourceLoginsFile, server.LoginMethodsOptions{
+		logins, err = server.LoadResourceLogins(config.ResourceLoginsFile, server.LoginMethodsOptions{
 			CallbackURL:    config.IdentityCallbackURL(),
 			ConnectorsFile: config.ConnectorsFile,
 			AllowInsecure:  config.LocalDevelopment || config.AllowInsecureConnectors,
@@ -41,12 +34,30 @@ func Open(config server.Config) (*server.Server, func(), error) {
 		if err != nil {
 			return fail(err)
 		}
+	}
+	config, identity, exchanger, err := buildProviders(config, store, logins)
+	if err != nil {
+		return fail(err)
+	}
+	auth, err := server.NewServer(config, store, identity, exchanger, os.Stderr)
+	if err != nil {
+		return fail(err)
+	}
+	if logins != nil {
 		for _, resource := range logins.ResourceURLs() {
 			if !slices.Contains(config.Resources, resource) {
 				return fail(fmt.Errorf("resource login names %q, which is not in MCP_AUTH_RESOURCES", resource))
 			}
 		}
 		auth.ResourceLogins = logins
+		if err := registerResourceExchangers(auth, store, logins); err != nil {
+			return fail(err)
+		}
+	}
+	if registry, ok := identity.(*server.LoginRegistry); ok {
+		if err := registerResourceExchangers(auth, store, registry); err != nil {
+			return fail(err)
+		}
 	}
 	if err = loadResourceClients(auth.Store, config.ResourceClientsFile, config.Resources); err != nil {
 		return fail(err)
@@ -142,18 +153,10 @@ func connectorNames(connectors map[string]server.ConnectorConfig) []string {
 	return names
 }
 
-func connectorNamesExcept(connectors map[string]server.ConnectorConfig, selected string) []string {
-	names := make([]string, 0, len(connectors))
-	for name := range connectors {
-		if name != selected {
-			names = append(names, name)
-		}
-	}
-	sort.Strings(names)
-	return names
-}
-
-func buildProviders(config server.Config, store server.Store) (server.Config, server.IdentityProvider, server.TokenExchanger, error) {
+// buildProviders builds the identity provider and exchanger. resourceLogins is the
+// loaded resource logins registry, or nil: connectors it uses are in use even though
+// only MCP_AUTH_CONNECTOR is the process's own login.
+func buildProviders(config server.Config, store server.Store, resourceLogins *server.LoginRegistry) (server.Config, server.IdentityProvider, server.TokenExchanger, error) {
 	if config.LoginMethodsFile != "" {
 		// Registry mode: several login methods on one login page. There is no
 		// single connector, so no downstream upstream-session exchanger either;
@@ -192,7 +195,19 @@ func buildProviders(config server.Config, store server.Store) (server.Config, se
 	// live. This warns rather than refuses because a single connectors file
 	// shared across deployments — a staging entry and a production one, each
 	// selected by its own MCP_AUTH_CONNECTOR — is a supported layout.
-	if ignored := connectorNamesExcept(connectors, config.ConnectorName); len(ignored) > 0 {
+	inUse := map[string]bool{config.ConnectorName: true}
+	if resourceLogins != nil {
+		for _, name := range resourceLogins.ConnectorNames() {
+			inUse[name] = true
+		}
+	}
+	var ignored []string
+	for _, name := range connectorNames(connectors) {
+		if !inUse[name] {
+			ignored = append(ignored, name)
+		}
+	}
+	if len(ignored) > 0 {
 		slog.Warn(
 			"connectors defined but not served by this process; only MCP_AUTH_CONNECTOR is live",
 			"selected", config.ConnectorName,
@@ -230,6 +245,24 @@ func copyConsent(in *server.ConsentConfig) *server.ConsentConfig {
 		}
 	}
 	return &out
+}
+
+// registerResourceExchangers gives each resource whose login keeps its upstream
+// session an exchanger that returns (and refreshes) that session, so the
+// resource's server receives its own provider's token. Resources without one
+// keep the connector's exchanger.
+func registerResourceExchangers(auth *server.Server, store server.Store, logins *server.LoginRegistry) error {
+	for resource, connector := range logins.UpstreamSessionConnectors() {
+		exchanger, err := server.NewUpstreamSessionExchanger(store, connector)
+		if err != nil {
+			return fmt.Errorf("resource %s: %w", resource, err)
+		}
+		if auth.ResourceExchangers == nil {
+			auth.ResourceExchangers = map[string]server.TokenExchanger{}
+		}
+		auth.ResourceExchangers[resource] = exchanger
+	}
+	return nil
 }
 
 // buildTokenExchanger selects the downstream-token strategy the connector is

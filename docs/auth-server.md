@@ -550,7 +550,11 @@ setting for an upstream whose published discovery metadata/documentation shows
 that its ID tokens do not carry `nonce`. It is not a general troubleshooting
 switch: use it only after verifying that limitation, because it omits both the
 request parameter and the ID-token check. The one-time, store-consumed upstream
-`state` and S256 PKCE verifier remain mandatory.
+`state` and the browser binding of the login remain mandatory, and so does S256 PKCE
+unless the connector also sets `"pkce": false`. A provider that supports neither
+(LinkedIn's standard apps publish no `nonce` claim and no PKCE support in their
+discovery document) needs both settings and a client secret; the one-time state, the
+browser binding and the client secret are then what bind the response to the request.
 
 For example, a Databricks connector may require this setting when its live
 OIDC discovery advertises no `nonce` claim:
@@ -606,6 +610,17 @@ internal service, whatever the connector fronts) is obtained:
 If unsure which a specific upstream provider supports, start with
 `upstream_session` — it needs nothing beyond what an ordinary Authorization
 Code + PKCE login already requires.
+
+**PKCE with the upstream provider.** The authorization request to the connector's
+provider uses PKCE (S256) by default, and the code exchange sends the matching
+`code_verifier`. A few providers refuse client-secret authentication for a code issued
+with PKCE; LinkedIn's standard apps answer the exchange with `401 invalid_client`
+(`Client authentication failed`) while the same credentials work for a code issued
+without it. For such a provider set `"pkce": false` on the connector. It sends no
+`code_challenge` and no `code_verifier`, and it is accepted only when the connector
+authenticates with a client secret (`client_secret_basic` or `client_secret_post`): a
+public client has nothing else to bind the code to, so `none` with `"pkce": false` is
+a startup error. Leave it unset for every provider that supports PKCE.
 
 A connector has two independent, optional redirect allowlists that are easy to
 conflate because they're both "redirect URIs":
@@ -692,7 +707,10 @@ reuse is detected.
 **`upstream_sessions` is the one exception to "the store never holds a usable
 secret."** The `upstream_session` downstream-token strategy needs to replay the
 upstream provider's own access/refresh token later, so unlike every other
-table it stores that token set directly, not a hash. Treat this table with the
+table it stores that token set directly, not a hash. The table is filled by the
+selected connector's login and by any [login method that sets
+`downstream_token`](login-methods.md#handing-the-providers-token-to-a-resource);
+nothing else writes to it. Treat this table with the
 same care as the signing key: it belongs in a store with encryption at rest
 and restricted access, not an unencrypted Docker volume, and a leak of it is
 equivalent to a leak of every affected user's downstream credential.

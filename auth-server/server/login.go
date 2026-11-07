@@ -109,6 +109,19 @@ type LoginEntry struct {
 	// uid can be equal strings), so without a prefix two people could share an
 	// access-token subject. The loader defaults it to "<id>:".
 	SubjectPrefix string
+	// KeepUpstreamSession keeps the token set the method's upstream provider
+	// issued at login, so a resource exchanger can hand it to that resource's
+	// server and refresh it. It is off by default: a database leak then exposes
+	// only the methods that need a downstream credential. It is meant for a
+	// method scoped to Resources, which is also what the exchanger is routed by.
+	KeepUpstreamSession bool
+	// UpstreamConnector is the provider the kept session came from; its token
+	// endpoint and client refresh that session. Required with
+	// KeepUpstreamSession.
+	UpstreamConnector *ConnectorConfig
+	// ConnectorName names the connectors-file entry an oidc method was built
+	// from. It lets the process report which connectors are in use.
+	ConnectorName string
 }
 
 // LoginRegistry is the set of enabled login methods. It also implements
@@ -160,13 +173,65 @@ func NewLoginRegistry(entries ...LoginEntry) (*LoginRegistry, error) {
 		case isCredential && len(credential.Fields()) == 0:
 			return nil, fmt.Errorf("login method %q has no form fields", id)
 		}
+		if entry.KeepUpstreamSession && (len(entry.Resources) == 0 || entry.UpstreamConnector == nil) {
+			return nil, fmt.Errorf("login method %q keeps its upstream session, which needs resources and a connector", id)
+		}
 		registry.byID[id] = entry
 		registry.entries = append(registry.entries, entry)
 	}
 	if err := registry.checkSubjectPrefixes(); err != nil {
 		return nil, err
 	}
+	if err := registry.checkUpstreamSessionResources(); err != nil {
+		return nil, err
+	}
 	return registry, nil
+}
+
+// checkUpstreamSessionResources allows one session-keeping method per
+// resource. The exchanger for a resource is chosen by the resource alone, so
+// two such methods could not tell which provider refreshes a given subject.
+func (r *LoginRegistry) checkUpstreamSessionResources() error {
+	owner := map[string]string{}
+	for _, entry := range r.entries {
+		if !entry.KeepUpstreamSession {
+			continue
+		}
+		for _, resource := range entry.Resources {
+			if other, taken := owner[resource]; taken {
+				return fmt.Errorf("login methods %q and %q both keep upstream sessions for %s; one resource can have only one", other, entry.Method.ID(), resource)
+			}
+			owner[resource] = entry.Method.ID()
+		}
+	}
+	return nil
+}
+
+// ConnectorNames returns the connectors-file entries the registry's oidc methods
+// use, so a connector a login depends on is never reported as unused.
+func (r *LoginRegistry) ConnectorNames() []string {
+	var names []string
+	for _, entry := range r.entries {
+		if entry.ConnectorName != "" {
+			names = append(names, entry.ConnectorName)
+		}
+	}
+	return names
+}
+
+// UpstreamSessionConnectors maps each resource whose login keeps its upstream
+// session to the connector that refreshes it.
+func (r *LoginRegistry) UpstreamSessionConnectors() map[string]ConnectorConfig {
+	connectors := map[string]ConnectorConfig{}
+	for _, entry := range r.entries {
+		if !entry.KeepUpstreamSession {
+			continue
+		}
+		for _, resource := range entry.Resources {
+			connectors[resource] = *entry.UpstreamConnector
+		}
+	}
+	return connectors
 }
 
 // checkSubjectPrefixes refuses prefixes under which two methods could mint
@@ -268,15 +333,18 @@ func (r *LoginRegistry) singleForResource(resource string) (LoginEntry, bool) {
 	return entries[0], true
 }
 
-// qualify namespaces the identity a method returned. Upstream tokens are not
-// kept: registry mode has no downstream strategy that would use them, so
-// storing them would only widen what a database leak exposes.
+// qualify namespaces the identity a method returned. Upstream tokens are
+// dropped unless the entry opts in with KeepUpstreamSession: without a
+// downstream strategy that uses them, storing them would only widen what a
+// database leak exposes.
 func (e LoginEntry) qualify(identity Identity) (Identity, error) {
 	if strings.TrimSpace(identity.Subject) == "" {
 		return Identity{}, errors.New("login method returned an empty subject")
 	}
 	identity.Subject = e.SubjectPrefix + identity.Subject
-	identity.UpstreamSession = nil
+	if !e.KeepUpstreamSession {
+		identity.UpstreamSession = nil
+	}
 	return identity, nil
 }
 

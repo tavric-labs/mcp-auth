@@ -249,6 +249,50 @@ Keycloak, Okta, Entra ID and any other OIDC or OAuth 2.0 provider. It is also
 how to reach LDAP through Keycloak's LDAP federation, if you prefer that to a
 native `ldap` method.
 
+An `oidc` method scoped to `resources` can also hand the provider's own access
+token to those resources' servers, for example a LinkedIn or GitLab token the
+resource server calls that provider's API with. Set
+`"downstream_token": "upstream_session"`; see
+[Handing the provider's token to a resource](#handing-the-providers-token-to-a-resource).
+
+## Handing the provider's token to a resource
+
+By default a login method establishes identity only and the provider's token set
+is discarded. A resource that needs to call the provider's API as the signed-in
+person (a LinkedIn post, a GitLab request) can opt in on an `oidc` method scoped
+to it:
+
+```json
+{"methods": [
+  {"id": "linkedin", "type": "oidc", "connector": "linkedin",
+   "subject_prefix": "linkedin:", "resources": ["https://auth.example.com/linkedin/mcp"],
+   "downstream_token": "upstream_session"}
+]}
+```
+
+- The token set the provider issued at login is stored for that person and handed
+  to the resource's server through the existing RFC 8693 token-exchange endpoint,
+  so the resource server's client needs no new endpoint. It is refreshed with the
+  provider's refresh token when one was issued.
+- Only the methods that set `downstream_token` keep a token; every other method,
+  and every resource without one, behaves exactly as before.
+- It needs `resources`, is supported on `oidc` methods only, and one resource can
+  have only one such method (the resource alone picks the exchanger, so two
+  could not tell whose provider refreshes a subject).
+- Other resources keep the connector's own exchanger. Resources served by a
+  method with `downstream_token` use that method's provider instead, even when
+  a single connector (`MCP_AUTH_CONNECTOR`) is configured.
+- **The store then holds a usable secret.** An opted-in method's access (and refresh)
+  token is stored in the auth server's database, the same exception the
+  `upstream_session` strategy already makes for a connector. Protect the database
+  as a credential store, and opt in only for resources that need it.
+- **Providers that issue no refresh token** (LinkedIn's self-serve products
+  issue an access token of about 60 days and none to refresh it) cannot be renewed
+  silently. After expiry the exchange fails with `upstream session expired and has
+  no refresh token`, and the person signs in again.
+- Register the shared `/identity/callback` URL with the provider as for any
+  redirect method.
+
 ## Subjects from different methods never collide
 
 A Google `sub`, a GitHub id and an LDAP `uid` can be the same string for
@@ -315,9 +359,11 @@ accounts are not linked.
 - **Records are kept apart.** Consent ids, login ids and provider states share
   one store table, and each kind is stored under its own key space, so an id
   from one stage cannot be used at another (a consent id is not a login id).
-- **No upstream session is kept.** Login methods establish identity only. The
-  `upstream_session` downstream-token strategy and RFC 8693 exchange against a
-  single connector are not available in this mode; use
+- **No upstream session is kept by default.** Login methods establish identity
+  only. An `oidc` method can opt in with `downstream_token` (see
+  [above](#handing-the-providers-token-to-a-resource)). The connector-wide
+  `upstream_session` strategy and RFC 8693 exchange against a single connector
+  are not available in this mode; use
   [external credential connectors](external-credentials.md) for downstream
   access.
 - **Consent and client redirect settings** come from the single-connector

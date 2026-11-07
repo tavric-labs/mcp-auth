@@ -37,6 +37,12 @@ type ConnectorConfig struct {
 	Scopes                  []string `json:"scopes"`
 	ExchangeClientID        string   `json:"exchange_client_id"`
 	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
+	// PKCE controls whether the upstream authorization request uses PKCE. It
+	// defaults to on. Set it to false only for a provider that refuses
+	// client-secret authentication for a code issued with PKCE (LinkedIn's
+	// standard apps do); that needs a client secret, so it is rejected for a
+	// public client, which would have nothing else to bind the code to.
+	PKCE *bool `json:"pkce"`
 	// AllowedUpstreamCallbackURIs restricts which of this server's own
 	// identity-callback URLs (MCP_AUTH_ISSUER + /identity/callback) may be
 	// registered with this connector's upstream provider. This guards the
@@ -146,6 +152,9 @@ func (c ConnectorConfig) validate(name string, allowInsecure bool) error {
 	}
 	if c.TokenEndpointAuthMethod != "none" && c.ClientSecretEnv == "" {
 		return fmt.Errorf("connector %q requires client_secret_env", name)
+	}
+	if !c.usesPKCE() && c.TokenEndpointAuthMethod == "none" {
+		return fmt.Errorf("connector %q cannot disable pkce without a client secret: a public client would have nothing else to bind the authorization code to", name)
 	}
 	if c.ExchangeClientID == "" {
 		return fmt.Errorf("connector %q is missing exchange_client_id", name)
@@ -262,6 +271,9 @@ func (c ConnectorConfig) ResolvedDownstreamTokenStrategy() string {
 
 // resolveClientID returns the connector's OAuth client_id, reading it from
 // the environment when client_id_env is set instead of a literal value.
+// usesPKCE reports whether the upstream authorization uses PKCE.
+func (c ConnectorConfig) usesPKCE() bool { return c.PKCE == nil || *c.PKCE }
+
 func (c ConnectorConfig) resolveClientID() (string, error) {
 	if c.ClientIDEnv == "" {
 		return c.ClientID, nil
