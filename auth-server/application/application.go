@@ -47,6 +47,14 @@ func Open(config server.Config) (*server.Server, func(), error) {
 			}
 		}
 		auth.ResourceLogins = logins
+		if err := registerResourceExchangers(auth, store, logins); err != nil {
+			return fail(err)
+		}
+	}
+	if registry, ok := identity.(*server.LoginRegistry); ok {
+		if err := registerResourceExchangers(auth, store, registry); err != nil {
+			return fail(err)
+		}
 	}
 	if err = loadResourceClients(auth.Store, config.ResourceClientsFile, config.Resources); err != nil {
 		return fail(err)
@@ -230,6 +238,24 @@ func copyConsent(in *server.ConsentConfig) *server.ConsentConfig {
 		}
 	}
 	return &out
+}
+
+// registerResourceExchangers gives each resource whose login keeps its upstream
+// session an exchanger that returns (and refreshes) that session, so the
+// resource's server receives its own provider's token. Resources without one
+// keep the connector's exchanger.
+func registerResourceExchangers(auth *server.Server, store server.Store, logins *server.LoginRegistry) error {
+	for resource, connector := range logins.UpstreamSessionConnectors() {
+		exchanger, err := server.NewUpstreamSessionExchanger(store, connector)
+		if err != nil {
+			return fmt.Errorf("resource %s: %w", resource, err)
+		}
+		if auth.ResourceExchangers == nil {
+			auth.ResourceExchangers = map[string]server.TokenExchanger{}
+		}
+		auth.ResourceExchangers[resource] = exchanger
+	}
+	return nil
 }
 
 // buildTokenExchanger selects the downstream-token strategy the connector is

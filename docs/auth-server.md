@@ -692,7 +692,10 @@ reuse is detected.
 **`upstream_sessions` is the one exception to "the store never holds a usable
 secret."** The `upstream_session` downstream-token strategy needs to replay the
 upstream provider's own access/refresh token later, so unlike every other
-table it stores that token set directly, not a hash. Treat this table with the
+table it stores that token set directly, not a hash. The table is filled by the
+selected connector's login and by any [login method that sets
+`downstream_token`](login-methods.md#handing-the-providers-token-to-a-resource);
+nothing else writes to it. Treat this table with the
 same care as the signing key: it belongs in a store with encryption at rest
 and restricted access, not an unencrypted Docker volume, and a leak of it is
 equivalent to a leak of every affected user's downstream credential.

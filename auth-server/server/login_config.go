@@ -38,6 +38,11 @@ type loginCommon struct {
 type loginOIDCEntry struct {
 	loginCommon
 	Connector string `json:"connector"`
+	// DownstreamToken, set to "upstream_session", keeps the token set the
+	// provider issues at login and hands it to the method's resources through
+	// the token-exchange endpoint, refreshing it when the provider allows.
+	// Empty keeps nothing, the default.
+	DownstreamToken string `json:"downstream_token"`
 }
 
 type loginGoogleEntry struct {
@@ -133,6 +138,7 @@ func ParseLoginMethods(data []byte, options LoginMethodsOptions) (*LoginRegistry
 			return nil, fmt.Errorf("login method %d: id is required", index+1)
 		}
 		label := common.Label
+		var keepConnector *ConnectorConfig
 		method, err := func() (LoginMethod, error) {
 			switch common.Type {
 			case "oidc":
@@ -156,6 +162,17 @@ func ParseLoginMethods(data []byte, options LoginMethodsOptions) (*LoginRegistry
 				connector, ok := connectors[entry.Connector]
 				if !ok {
 					return nil, fmt.Errorf("connector %q is not in the connectors file", entry.Connector)
+				}
+				switch entry.DownstreamToken {
+				case "":
+				case DownstreamTokenStrategyUpstreamSession:
+					if len(common.Resources) == 0 {
+						return nil, errors.New("downstream_token needs resources: the token is handed to the resources this method serves")
+					}
+					kept := connector
+					keepConnector = &kept
+				default:
+					return nil, fmt.Errorf("downstream_token %q is not supported (only %q)", entry.DownstreamToken, DownstreamTokenStrategyUpstreamSession)
 				}
 				provider, err := NewOIDCIdentityProvider(connector, options.CallbackURL, options.AllowInsecure)
 				if err != nil {
@@ -209,7 +226,10 @@ func ParseLoginMethods(data []byte, options LoginMethodsOptions) (*LoginRegistry
 		if common.SubjectPrefix != nil {
 			prefix = *common.SubjectPrefix
 		}
-		entries = append(entries, LoginEntry{Method: method, SubjectPrefix: prefix, Resources: common.Resources})
+		entries = append(entries, LoginEntry{
+			Method: method, SubjectPrefix: prefix, Resources: common.Resources,
+			KeepUpstreamSession: keepConnector != nil, UpstreamConnector: keepConnector,
+		})
 	}
 	return NewLoginRegistry(entries...)
 }
