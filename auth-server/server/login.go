@@ -119,6 +119,9 @@ type LoginEntry struct {
 	// endpoint and client refresh that session. Required with
 	// KeepUpstreamSession.
 	UpstreamConnector *ConnectorConfig
+	// ConnectorName names the connectors-file entry an oidc method was built
+	// from. It lets the process report which connectors are in use.
+	ConnectorName string
 }
 
 // LoginRegistry is the set of enabled login methods. It also implements
@@ -202,6 +205,18 @@ func (r *LoginRegistry) checkUpstreamSessionResources() error {
 		}
 	}
 	return nil
+}
+
+// ConnectorNames returns the connectors-file entries the registry's oidc methods
+// use, so a connector a login depends on is never reported as unused.
+func (r *LoginRegistry) ConnectorNames() []string {
+	var names []string
+	for _, entry := range r.entries {
+		if entry.ConnectorName != "" {
+			names = append(names, entry.ConnectorName)
+		}
+	}
+	return names
 }
 
 // UpstreamSessionConnectors maps each resource whose login keeps its upstream

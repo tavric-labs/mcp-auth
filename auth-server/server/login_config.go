@@ -139,6 +139,7 @@ func ParseLoginMethods(data []byte, options LoginMethodsOptions) (*LoginRegistry
 		}
 		label := common.Label
 		var keepConnector *ConnectorConfig
+		var usedConnector string
 		method, err := func() (LoginMethod, error) {
 			switch common.Type {
 			case "oidc":
@@ -163,6 +164,7 @@ func ParseLoginMethods(data []byte, options LoginMethodsOptions) (*LoginRegistry
 				if !ok {
 					return nil, fmt.Errorf("connector %q is not in the connectors file", entry.Connector)
 				}
+				usedConnector = entry.Connector
 				switch entry.DownstreamToken {
 				case "":
 				case DownstreamTokenStrategyUpstreamSession:
@@ -228,7 +230,7 @@ func ParseLoginMethods(data []byte, options LoginMethodsOptions) (*LoginRegistry
 		}
 		entries = append(entries, LoginEntry{
 			Method: method, SubjectPrefix: prefix, Resources: common.Resources,
-			KeepUpstreamSession: keepConnector != nil, UpstreamConnector: keepConnector,
+			KeepUpstreamSession: keepConnector != nil, UpstreamConnector: keepConnector, ConnectorName: usedConnector,
 		})
 	}
 	return NewLoginRegistry(entries...)
