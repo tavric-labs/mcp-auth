@@ -550,7 +550,11 @@ setting for an upstream whose published discovery metadata/documentation shows
 that its ID tokens do not carry `nonce`. It is not a general troubleshooting
 switch: use it only after verifying that limitation, because it omits both the
 request parameter and the ID-token check. The one-time, store-consumed upstream
-`state` and S256 PKCE verifier remain mandatory.
+`state` and the browser binding of the login remain mandatory, and so does S256 PKCE
+unless the connector also sets `"pkce": false`. A provider that supports neither
+(LinkedIn's standard apps publish no `nonce` claim and no PKCE support in their
+discovery document) needs both settings and a client secret; the one-time state, the
+browser binding and the client secret are then what bind the response to the request.
 
 For example, a Databricks connector may require this setting when its live
 OIDC discovery advertises no `nonce` claim:
