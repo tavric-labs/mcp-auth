@@ -33,6 +33,12 @@ type Server struct {
 	// connector. Exchanges from that resource's client take the
 	// credential-assertion path instead of TokenExchanger.
 	ExternalCredentials map[string]ExternalCredentialConfig
+	// ResourceExchangers maps a resource URL to the exchanger that serves
+	// token exchanges from that resource's client, ahead of TokenExchanger. A
+	// resource login that keeps its upstream session registers one here, so
+	// its downstream credential comes from its own provider while every other
+	// resource keeps the connector's exchanger.
+	ResourceExchangers map[string]TokenExchanger
 	// ClientMetadataClient fetches OAuth Client ID Metadata Documents.
 	// Nil uses a client with a short timeout that does not follow redirects.
 	ClientMetadataClient *http.Client
@@ -640,7 +646,11 @@ func (s *Server) exchange(w http.ResponseWriter, r *http.Request, client Client)
 		s.exchangeExternal(w, r, client, entry)
 		return
 	}
-	if s.TokenExchanger == nil {
+	exchanger := s.TokenExchanger
+	if resourceExchanger, ok := s.ResourceExchangers[client.Resource]; ok {
+		exchanger = resourceExchanger
+	}
+	if exchanger == nil {
 		oauthError(w, http.StatusBadRequest, "unsupported_grant_type")
 		return
 	}
@@ -662,7 +672,7 @@ func (s *Server) exchange(w http.ResponseWriter, r *http.Request, client Client)
 		return
 	}
 	subject, _ := subjectClaims["sub"].(string)
-	response, err := s.TokenExchanger.Exchange(r.Context(), ExchangeRequest{Subject: subject, SubjectToken: subjectToken, RequestedTokenType: r.FormValue("requested_token_type"), Audience: r.FormValue("audience"), Scope: strings.Fields(r.FormValue("scope"))})
+	response, err := exchanger.Exchange(r.Context(), ExchangeRequest{Subject: subject, SubjectToken: subjectToken, RequestedTokenType: r.FormValue("requested_token_type"), Audience: r.FormValue("audience"), Scope: strings.Fields(r.FormValue("scope"))})
 	if err != nil {
 		status, reason, description := classifyExchangeError(err)
 		s.Audit.Event("token_exchange", "failure", map[string]any{"client_id": client.ID, "audience": r.FormValue("audience"), "reason": reason})
