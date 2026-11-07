@@ -364,3 +364,81 @@ func TestProviderOAuthErrorIsBoundedAndTolerantOfOtherBodies(t *testing.T) {
 		t.Errorf("error without a description = %q", got)
 	}
 }
+
+func pkceConnector(auth string, pkce *bool, tokenEndpoint string) ConnectorConfig {
+	return ConnectorConfig{
+		Issuer: "https://upstream.example.com", AuthorizationEndpoint: "https://upstream.example.com/authorize", TokenEndpoint: tokenEndpoint,
+		JWKSURI: "https://upstream.example.com/jwks", ClientID: "client", ClientSecretEnv: "TEST_PKCE_SECRET", ExchangeClientID: "client",
+		TokenEndpointAuthMethod: auth, Scopes: []string{"openid"}, PKCE: pkce,
+	}
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+// Some providers (LinkedIn's standard apps) refuse client-secret authentication
+// for a code issued with PKCE. A connector can turn PKCE off; the default keeps
+// it on so no existing connector changes.
+func TestOIDCBeginSendsPKCEUnlessTheConnectorDisablesIt(t *testing.T) {
+	t.Setenv("TEST_PKCE_SECRET", "secret")
+	for name, tc := range map[string]struct {
+		pkce      *bool
+		challenge bool
+	}{"default": {nil, true}, "explicitly on": {boolPtr(true), true}, "off": {boolPtr(false), false}} {
+		provider, err := NewOIDCIdentityProvider(pkceConnector("client_secret_post", tc.pkce, "https://upstream.example.com/token"), "http://localhost:8080/identity/callback", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		location, verifier, err := provider.Begin(context.Background(), IdentityRequest{Nonce: "n"}, "state-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		query, _ := url.Parse(location)
+		got := query.Query().Get("code_challenge") != "" && query.Query().Get("code_challenge_method") == "S256"
+		if got != tc.challenge {
+			t.Errorf("%s: code_challenge sent = %v, want %v (%s)", name, got, tc.challenge, location)
+		}
+		if verifier == "" {
+			t.Errorf("%s: Begin returned no verifier, which the stored login state relies on", name)
+		}
+	}
+}
+
+func TestOIDCCompleteSendsTheCodeVerifierOnlyWhenPKCEIsOn(t *testing.T) {
+	t.Setenv("TEST_PKCE_SECRET", "secret")
+	for name, tc := range map[string]struct {
+		pkce *bool
+		want bool
+	}{"default": {nil, true}, "off": {boolPtr(false), false}} {
+		var sent url.Values
+		tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = r.ParseForm()
+			sent = r.PostForm
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"stop_here"}`))
+		}))
+		provider, err := NewOIDCIdentityProvider(pkceConnector("client_secret_post", tc.pkce, tokenServer.URL), "http://localhost:8080/identity/callback", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = provider.Complete(context.Background(), IdentityCallback{Code: "c", RedirectURI: "http://localhost:8080/identity/callback", State: "s", Nonce: "n", CodeVerifier: "stored-verifier"})
+		tokenServer.Close()
+		if (sent.Get("code_verifier") != "") != tc.want {
+			t.Errorf("%s: code_verifier sent = %q, want sent=%v", name, sent.Get("code_verifier"), tc.want)
+		}
+		if sent.Get("client_secret") != "secret" || sent.Get("client_id") != "client" {
+			t.Errorf("%s: client credentials were not sent in the body: %v", name, sent)
+		}
+	}
+}
+
+func TestPKCECanOnlyBeDisabledForAConnectorWithAClientSecret(t *testing.T) {
+	t.Setenv("TEST_PKCE_SECRET", "secret")
+	if err := pkceConnector("client_secret_post", boolPtr(false), "https://upstream.example.com/token").validate("c", false); err != nil {
+		t.Errorf("a confidential connector could not disable PKCE: %v", err)
+	}
+	public := pkceConnector("none", boolPtr(false), "https://upstream.example.com/token")
+	public.ClientSecretEnv = ""
+	if err := public.validate("c", false); err == nil {
+		t.Error("PKCE was disabled for a public client, which has nothing else to bind the code to")
+	}
+}

@@ -90,13 +90,15 @@ func (p *OIDCIdentityProvider) Begin(_ context.Context, request IdentityRequest,
 		scopes = []string{"openid"}
 	}
 	values := url.Values{
-		"response_type":         {"code"},
-		"client_id":             {p.ClientID},
-		"redirect_uri":          {p.CallbackURL},
-		"scope":                 {strings.Join(scopes, " ")},
-		"state":                 {state},
-		"code_challenge":        {base64.RawURLEncoding.EncodeToString(digest[:])},
-		"code_challenge_method": {"S256"},
+		"response_type": {"code"},
+		"client_id":     {p.ClientID},
+		"redirect_uri":  {p.CallbackURL},
+		"scope":         {strings.Join(scopes, " ")},
+		"state":         {state},
+	}
+	if p.Connector.usesPKCE() {
+		values.Set("code_challenge", base64.RawURLEncoding.EncodeToString(digest[:]))
+		values.Set("code_challenge_method", "S256")
 	}
 	if p.Connector.requiresIDTokenNonce() {
 		values.Set("nonce", request.Nonce)
@@ -112,11 +114,13 @@ func (p *OIDCIdentityProvider) Complete(ctx context.Context, callback IdentityCa
 		return Identity{}, errors.New("OIDC upstream state is invalid or expired")
 	}
 	form := url.Values{
-		"grant_type":    {"authorization_code"},
-		"code":          {callback.Code},
-		"redirect_uri":  {callback.RedirectURI},
-		"client_id":     {p.ClientID},
-		"code_verifier": {callback.CodeVerifier},
+		"grant_type":   {"authorization_code"},
+		"code":         {callback.Code},
+		"redirect_uri": {callback.RedirectURI},
+		"client_id":    {p.ClientID},
+	}
+	if p.Connector.usesPKCE() {
+		form.Set("code_verifier", callback.CodeVerifier)
 	}
 	if p.Client == nil {
 		p.Client = http.DefaultClient

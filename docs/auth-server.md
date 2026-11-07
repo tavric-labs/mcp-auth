@@ -607,6 +607,17 @@ If unsure which a specific upstream provider supports, start with
 `upstream_session` — it needs nothing beyond what an ordinary Authorization
 Code + PKCE login already requires.
 
+**PKCE with the upstream provider.** The authorization request to the connector's
+provider uses PKCE (S256) by default, and the code exchange sends the matching
+`code_verifier`. A few providers refuse client-secret authentication for a code issued
+with PKCE; LinkedIn's standard apps answer the exchange with `401 invalid_client`
+(`Client authentication failed`) while the same credentials work for a code issued
+without it. For such a provider set `"pkce": false` on the connector. It sends no
+`code_challenge` and no `code_verifier`, and it is accepted only when the connector
+authenticates with a client secret (`client_secret_basic` or `client_secret_post`): a
+public client has nothing else to bind the code to, so `none` with `"pkce": false` is
+a startup error. Leave it unset for every provider that supports PKCE.
+
 A connector has two independent, optional redirect allowlists that are easy to
 conflate because they're both "redirect URIs":
 
