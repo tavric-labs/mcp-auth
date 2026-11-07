@@ -131,7 +131,7 @@ func (p *OIDCIdentityProvider) Complete(ctx context.Context, callback IdentityCa
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return Identity{}, fmt.Errorf("OIDC token request returned HTTP %d", response.StatusCode)
+		return Identity{}, tokenEndpointError("OIDC token request", response)
 	}
 	var tokenResponse struct {
 		IDToken      string `json:"id_token"`
@@ -272,6 +272,48 @@ func newTokenEndpointRequest(ctx context.Context, connector ConnectorConfig, cli
 		request.SetBasicAuth(clientID, secret)
 	}
 	return request, nil
+}
+
+// tokenEndpointError describes a refused token request: the status, plus the
+// provider's own OAuth error code and description when it sent them. Those two
+// RFC 6749 fields are what an operator needs to fix a connector; nothing else
+// from the response, and nothing from the request, is included.
+func tokenEndpointError(what string, response *http.Response) error {
+	if detail := providerOAuthError(response.Body); detail != "" {
+		return fmt.Errorf("%s returned HTTP %d: %s", what, response.StatusCode, detail)
+	}
+	return fmt.Errorf("%s returned HTTP %d", what, response.StatusCode)
+}
+
+// providerOAuthError reads at most 4 KiB of an error response and returns
+// "error" or "error (description)" from its JSON body, cleaned of control
+// characters and capped, or "" when the body is not an OAuth error object.
+func providerOAuthError(body io.Reader) string {
+	var parsed struct {
+		Error       string `json:"error"`
+		Description string `json:"error_description"`
+	}
+	if json.NewDecoder(io.LimitReader(body, 4096)).Decode(&parsed) != nil || parsed.Error == "" {
+		return ""
+	}
+	clean := func(value string, limit int) string {
+		value = strings.Map(func(r rune) rune {
+			if r < 0x20 || r == 0x7f {
+				return ' '
+			}
+			return r
+		}, value)
+		value = strings.Join(strings.Fields(value), " ")
+		if len(value) > limit {
+			value = value[:limit]
+		}
+		return value
+	}
+	detail := clean(parsed.Error, 80)
+	if description := clean(parsed.Description, 240); description != "" {
+		detail += " (" + description + ")"
+	}
+	return detail
 }
 
 // OIDCTokenExchanger implements RFC 8693 against the selected provider.

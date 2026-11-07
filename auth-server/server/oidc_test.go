@@ -307,3 +307,60 @@ func TestIDTokenNoncePolicyValidation(t *testing.T) {
 		t.Fatal("unsupported nonce policy was accepted")
 	}
 }
+
+// A provider refusing a token request says why in its OAuth error fields.
+// Operators need that text to fix a misconfigured connector, so it is carried
+// into the failure reason, bounded and cleaned, while the request's own secrets
+// (code, verifier, client secret) never appear in it.
+func TestOIDCCompleteReportsTheProvidersOAuthError(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": "invalid_request", "error_description": "Unable to retrieve access token: authorization code not found\nsecond line",
+			"unrelated": "must not be reported",
+		})
+	}))
+	defer tokenServer.Close()
+	provider := &OIDCIdentityProvider{
+		Connector: ConnectorConfig{Issuer: "https://upstream.example.com", TokenEndpoint: tokenServer.URL, TokenEndpointAuthMethod: "none"},
+		Client:    http.DefaultClient, ClientID: "test-client",
+	}
+	_, err := provider.Complete(context.Background(), IdentityCallback{
+		Code: "secret-auth-code", RedirectURI: "https://mcp-auth.example.com/identity/callback", State: "s", Nonce: "n", CodeVerifier: "secret-verifier",
+	})
+	if err == nil {
+		t.Fatal("a refused token request was accepted")
+	}
+	message := err.Error()
+	for _, want := range []string{"HTTP 401", "invalid_request", "authorization code not found"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("error %q does not mention %q", message, want)
+		}
+	}
+	for _, leak := range []string{"secret-auth-code", "secret-verifier", "must not be reported", "\n"} {
+		if strings.Contains(message, leak) {
+			t.Errorf("error %q must not contain %q", message, leak)
+		}
+	}
+}
+
+func TestProviderOAuthErrorIsBoundedAndTolerantOfOtherBodies(t *testing.T) {
+	long := strings.Repeat("x", 5000)
+	for name, body := range map[string]string{
+		"not json":   "<html>gateway error</html>",
+		"empty":      "",
+		"wrong type": `{"error": 5, "error_description": ["a"]}`,
+		"huge":       `{"error": "` + long + `", "error_description": "` + long + `"}`,
+	} {
+		detail := providerOAuthError(strings.NewReader(body))
+		if len(detail) > 400 {
+			t.Errorf("%s: detail is %d bytes, want it bounded", name, len(detail))
+		}
+		if strings.ContainsAny(detail, "\n\r\t") {
+			t.Errorf("%s: detail contains control characters: %q", name, detail)
+		}
+	}
+	if got := providerOAuthError(strings.NewReader(`{"error":"invalid_grant"}`)); got != "invalid_grant" {
+		t.Errorf("error without a description = %q", got)
+	}
+}

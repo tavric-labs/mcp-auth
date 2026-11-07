@@ -91,7 +91,7 @@ func (e *UpstreamSessionExchanger) refresh(ctx context.Context, session Upstream
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return UpstreamSession{}, fmt.Errorf("refresh upstream session returned HTTP %d", response.StatusCode)
+		return UpstreamSession{}, tokenEndpointError("refresh upstream session", response)
 	}
 	var token struct {
 		AccessToken  string `json:"access_token"`
