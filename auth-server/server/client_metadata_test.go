@@ -9,7 +9,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestClientMetadataURLRejected(t *testing.T) {
@@ -195,3 +197,119 @@ func TestClientIDMetadataHostAllowlist(t *testing.T) {
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
+
+func withResolver(t *testing.T, ips ...string) {
+	t.Helper()
+	previous := lookupIPAddr
+	t.Cleanup(func() { lookupIPAddr = previous })
+	lookupIPAddr = func(context.Context, string) ([]net.IPAddr, error) {
+		var out []net.IPAddr
+		for _, value := range ips {
+			out = append(out, net.IPAddr{IP: net.ParseIP(value)})
+		}
+		return out, nil
+	}
+}
+
+func listenLoopback(t *testing.T) (port string) {
+	t.Helper()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	_, port, _ = net.SplitHostPort(listener.Addr().String())
+	return port
+}
+
+// A dual-stack host whose first answer is an unreachable family must still
+// connect over the other family: this is the chatgpt.com failure, where the
+// pod has no IPv6 route and only the first address used to be tried.
+func TestPublicOnlyDialFallsBackWhenFirstAddressUnreachable(t *testing.T) {
+	port := listenLoopback(t)
+	withResolver(t, "::1", "127.0.0.1")
+	dial := publicOnlyDialContext(true)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, err := dial(ctx, "tcp", net.JoinHostPort("dual.example", port))
+	if err != nil {
+		t.Fatalf("dial did not fall back to the reachable address: %v", err)
+	}
+	conn.Close()
+}
+
+// A first address that blackholes must not consume the whole deadline.
+func TestDialVettedPerAddressTimeoutLetsSecondAddressSucceed(t *testing.T) {
+	blackhole := net.ParseIP("2001:db8::1")
+	good := net.ParseIP("192.0.2.1")
+	var attempted []string
+	var mu sync.Mutex
+	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, _, _ := net.SplitHostPort(address)
+		mu.Lock()
+		attempted = append(attempted, host)
+		mu.Unlock()
+		if host == blackhole.String() {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		client, server := net.Pipe()
+		t.Cleanup(func() { server.Close() })
+		return client, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	conn, err := dialVetted(ctx, "tcp", "443", []net.IP{blackhole, good}, dial, 300*time.Millisecond, 20*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("fallback took %s", elapsed)
+	}
+	for _, host := range attempted {
+		if host != blackhole.String() && host != good.String() {
+			t.Fatalf("dialed unvetted address %s", host)
+		}
+	}
+}
+
+func TestDialVettedPrefersIPv4AndInterleaves(t *testing.T) {
+	ips := []net.IP{net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"), net.ParseIP("192.0.2.1"), net.ParseIP("192.0.2.2")}
+	got := orderHappyEyeballs(ips)
+	want := []string{"192.0.2.1", "2001:db8::1", "192.0.2.2", "2001:db8::2"}
+	for i := range want {
+		if got[i].String() != want[i] {
+			t.Fatalf("order[%d] = %s, want %s", i, got[i], want[i])
+		}
+	}
+}
+
+func TestDialVettedAllFail(t *testing.T) {
+	dial := func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("refused") }
+	_, err := dialVetted(context.Background(), "tcp", "443", []net.IP{net.ParseIP("192.0.2.1"), net.ParseIP("2001:db8::1")}, dial, time.Second, time.Millisecond)
+	if err == nil {
+		t.Fatal("expected an error when every address fails")
+	}
+}
+
+// One blocked address in the record set refuses the whole set, even when the
+// other address is public and reachable.
+func TestPublicOnlyDialRefusesMixedPublicAndPrivate(t *testing.T) {
+	withResolver(t, "93.184.216.34", "10.0.0.5")
+	dial := publicOnlyDialContext(false)
+	if conn, err := dial(context.Background(), "tcp", "mixed.example:443"); err == nil {
+		conn.Close()
+		t.Fatal("dial accepted a record set containing a private address")
+	}
+}

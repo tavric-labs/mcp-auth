@@ -105,27 +105,130 @@ func newClientMetadataClient(allowLoopback bool) *http.Client {
 // also closes the rebinding window between validation and connection. Every
 // resolved address must be allowed, so a record set mixing a public and a
 // private answer is refused rather than raced.
+// lookupIPAddr resolves the metadata host. It is a variable only so tests can
+// supply a record set; production always uses the system resolver.
+var lookupIPAddr = net.DefaultResolver.LookupIPAddr
+
 func publicOnlyDialContext(allowLoopback bool) func(context.Context, string, string) (net.Conn, error) {
-	dialer := &net.Dialer{Timeout: clientMetadataTimeout}
+	dialer := &net.Dialer{}
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
 			return nil, err
 		}
-		addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		addrs, err := lookupIPAddr(ctx, host)
 		if err != nil {
 			return nil, err
 		}
 		if len(addrs) == 0 {
 			return nil, errors.New("client metadata host did not resolve")
 		}
+		ips := make([]net.IP, 0, len(addrs))
 		for _, addr := range addrs {
 			if !dialableIP(addr.IP, allowLoopback) {
 				return nil, errors.New("client metadata host resolves to a blocked address")
 			}
+			ips = append(ips, addr.IP)
 		}
-		return dialer.DialContext(ctx, network, net.JoinHostPort(addrs[0].IP.String(), port))
+		return dialVetted(ctx, network, port, ips, dialer.DialContext, metadataDialAttemptTimeout, metadataDialStagger)
 	}
+}
+
+const (
+	// metadataDialAttemptTimeout bounds one address so a family with no route
+	// cannot spend the whole clientMetadataTimeout.
+	metadataDialAttemptTimeout = 2 * time.Second
+	// metadataDialStagger is the RFC 8305 connection attempt delay.
+	metadataDialStagger = 250 * time.Millisecond
+)
+
+// orderHappyEyeballs puts IPv4 first and alternates families after that
+// (RFC 8305 section 4), keeping the resolver's order within a family.
+func orderHappyEyeballs(ips []net.IP) []net.IP {
+	var v4, v6 []net.IP
+	for _, ip := range ips {
+		if ip.To4() != nil {
+			v4 = append(v4, ip)
+		} else {
+			v6 = append(v6, ip)
+		}
+	}
+	out := make([]net.IP, 0, len(ips))
+	for i := 0; i < len(v4) || i < len(v6); i++ {
+		if i < len(v4) {
+			out = append(out, v4[i])
+		}
+		if i < len(v6) {
+			out = append(out, v6[i])
+		}
+	}
+	return out
+}
+
+// dialVetted connects to one of ips, which the caller has already checked with
+// dialableIP; it dials only those addresses and never resolves a name. Attempts
+// start one per stagger, or immediately when the previous one failed, each
+// bounded by perAttempt. The first success wins and the others are cancelled.
+func dialVetted(ctx context.Context, network, port string, ips []net.IP, dial func(context.Context, string, string) (net.Conn, error), perAttempt, stagger time.Duration) (net.Conn, error) {
+	ordered := orderHappyEyeballs(ips)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	results := make(chan result, len(ordered))
+	launch := func(ip net.IP) {
+		go func() {
+			attemptCtx, attemptCancel := context.WithTimeout(ctx, perAttempt)
+			defer attemptCancel()
+			conn, err := dial(attemptCtx, network, net.JoinHostPort(ip.String(), port))
+			results <- result{conn, err}
+		}()
+	}
+	var firstErr error
+	started, finished := 0, 0
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	for finished < len(ordered) {
+		select {
+		case <-timer.C:
+			if started < len(ordered) {
+				launch(ordered[started])
+				started++
+				timer.Reset(stagger)
+			}
+		case res := <-results:
+			finished++
+			if res.err == nil {
+				// Drain the losers so a late success does not leak a connection.
+				go func(remaining int) {
+					for ; remaining > 0; remaining-- {
+						if late := <-results; late.conn != nil {
+							late.conn.Close()
+						}
+					}
+				}(len(ordered) - finished)
+				return res.conn, nil
+			}
+			if firstErr == nil {
+				firstErr = res.err
+			}
+			if started < len(ordered) && started == finished {
+				// Everything in flight failed: try the next address now.
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(0)
+			}
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return nil, firstErr
 }
 
 // dialableIP reports whether one resolved address may be fetched. net.IP's own
