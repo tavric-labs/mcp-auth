@@ -130,7 +130,7 @@ docker run --rm -p 8080:8080 \
   -e MCP_AUTH_LOCAL_DEVELOPMENT=true \
   -e MCP_AUTH_REGISTRATION_ENABLED=true \
   -e MCP_AUTH_REQUIRE_HTTPS=false \
-  princekrroshan01/mcp-auth-server:0.6.0
+  princekrroshan01/mcp-auth-server:0.8.0
 ```
 
 That command is local-development-only: it disables TLS and the upstream
@@ -183,6 +183,10 @@ Important settings:
   the connector's flow, downstream token exchange included. Each method must set `resources` and a non-empty
   `subject_prefix`. It needs `MCP_AUTH_CONNECTORS_FILE` for the connectors the methods reference, and cannot be
   combined with `MCP_AUTH_LOGIN_METHODS_FILE`.
+- `MCP_AUTH_STRICT_LOGIN_METHODS`: default `false`. By default a login method whose own configuration is
+  invalid (for example it names a connector missing from the connectors file) is disabled, logged at ERROR level
+  and listed in `/readyz` as `login_methods_disabled`, while the valid methods keep serving. Set `true` to make
+  any invalid method fail startup instead. See [Invalid methods are disabled](connectors.md#invalid-methods-are-disabled-not-fatal).
 - `MCP_AUTH_LOGIN_TTL`: how long a person has to finish signing in with login methods (default `10m`).
 - `MCP_AUTH_CONNECTOR`: selected connector name. One running process serves exactly one connector and can
   serve several resources with `MCP_AUTH_RESOURCES` — see [Serving multiple resources](#serving-multiple-resources).

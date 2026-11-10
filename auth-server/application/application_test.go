@@ -100,3 +100,37 @@ func TestUnservedConnectorWarningSkipsConnectorsAResourceLoginUses(t *testing.T)
 		t.Fatalf("a connector a resource login uses was reported as not served: %s", warning)
 	}
 }
+
+func writeLoginTestFile(t *testing.T, name, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestEveryLoginMethodDisabledStopsStartup(t *testing.T) {
+	methods := writeLoginTestFile(t, "methods.json", `{"methods": [{"id":"a","type":"oidc","connector":"nope"}]}`)
+	connectors := writeLoginTestFile(t, "connectors.json", `{}`)
+	config := server.Config{Issuer: "http://localhost:8080", LoginMethodsFile: methods, ConnectorsFile: connectors, LocalDevelopment: true}
+	if _, _, _, err := buildProviders(config, server.NewMemoryStore(), nil); err == nil {
+		t.Fatal("a server with no usable login method started")
+	}
+}
+
+func TestStrictLoginMethodsRestoresFailFast(t *testing.T) {
+	t.Setenv("TEST_GOOGLE_SECRET", "s")
+	methods := writeLoginTestFile(t, "methods.json", `{"methods": [
+  {"id":"google","type":"google","client_id":"x","client_secret_env":"TEST_GOOGLE_SECRET"},
+  {"id":"a","type":"oidc","connector":"nope"}]}`)
+	connectors := writeLoginTestFile(t, "connectors.json", `{}`)
+	config := server.Config{Issuer: "http://localhost:8080", LoginMethodsFile: methods, ConnectorsFile: connectors, LocalDevelopment: true}
+	if _, _, _, err := buildProviders(config, server.NewMemoryStore(), nil); err != nil {
+		t.Fatalf("default must keep the valid method serving: %v", err)
+	}
+	config.StrictLoginMethods = true
+	if _, _, _, err := buildProviders(config, server.NewMemoryStore(), nil); err == nil {
+		t.Fatal("strict mode accepted an invalid method")
+	}
+}

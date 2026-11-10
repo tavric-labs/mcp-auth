@@ -1,0 +1,17 @@
+{
+  "example-oauth2": {
+    "issuer": "https://provider.example.com",
+    "authorization_endpoint": "https://provider.example.com/oauth/authorize",
+    "token_endpoint": "https://provider.example.com/oauth/token",
+    "userinfo_endpoint": "https://provider.example.com/api/userinfo",
+    "client_id_env": "EXAMPLE_OAUTH2_CLIENT_ID",
+    "client_secret_env": "EXAMPLE_OAUTH2_CLIENT_SECRET",
+    "token_endpoint_auth_method": "client_secret_post",
+    "exchange_client_id": "unused",
+    "scopes": ["profile", "email"],
+    "identity_claims": ["sub", "email"],
+    "pkce": false,
+    "id_token_nonce_policy": "disabled",
+    "allowed_upstream_callback_uris": ["https://auth.example.com/identity/callback"]
+  }
+}

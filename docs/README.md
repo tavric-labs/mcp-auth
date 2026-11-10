@@ -10,7 +10,9 @@ to configuration, runnable examples and verification coverage.
 Read [Architecture](architecture.md) for the OAuth flow and component boundaries,
 then [Authorization server](auth-server.md) for configuration, identity-provider
 connectors and the production checklist. Use [Login methods](login-methods.md)
-when offering multiple sign-in options.
+when offering multiple sign-in options, and
+[Connectors, login methods and resource logins](connectors.md) for the full
+inventory, the connector schema and how to add a provider.
 
 Production needs a configured upstream identity source (one OIDC/OAuth connector
 or the login-method registry, including LDAP) and a public HTTPS issuer.

@@ -1,0 +1,5 @@
+{
+  "methods": [
+    {"id": "example", "type": "oidc", "connector": "example-oauth2", "label": "Sign in with Example"}
+  ]
+}

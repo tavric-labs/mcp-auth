@@ -27,9 +27,10 @@ func Open(config server.Config) (*server.Server, func(), error) {
 	var logins *server.LoginRegistry
 	if config.ResourceLoginsFile != "" {
 		logins, err = server.LoadResourceLogins(config.ResourceLoginsFile, server.LoginMethodsOptions{
-			CallbackURL:    config.IdentityCallbackURL(),
-			ConnectorsFile: config.ConnectorsFile,
-			AllowInsecure:  config.LocalDevelopment || config.AllowInsecureConnectors,
+			CallbackURL:        config.IdentityCallbackURL(),
+			ConnectorsFile:     config.ConnectorsFile,
+			AllowInsecure:      config.LocalDevelopment || config.AllowInsecureConnectors,
+			SkipInvalidMethods: !config.StrictLoginMethods,
 		})
 		if err != nil {
 			return fail(err)
@@ -162,12 +163,16 @@ func buildProviders(config server.Config, store server.Store, resourceLogins *se
 		// single connector, so no downstream upstream-session exchanger either;
 		// external credential connectors are configured separately.
 		registry, err := server.LoadLoginMethods(config.LoginMethodsFile, server.LoginMethodsOptions{
-			CallbackURL:    config.IdentityCallbackURL(),
-			ConnectorsFile: config.ConnectorsFile,
-			AllowInsecure:  config.LocalDevelopment || config.AllowInsecureConnectors,
+			CallbackURL:        config.IdentityCallbackURL(),
+			ConnectorsFile:     config.ConnectorsFile,
+			AllowInsecure:      config.LocalDevelopment || config.AllowInsecureConnectors,
+			SkipInvalidMethods: !config.StrictLoginMethods,
 		})
 		if err != nil {
 			return config, nil, nil, err
+		}
+		if registry.EnabledCount() == 0 {
+			return config, nil, nil, errors.New("every login method is disabled because its configuration is invalid; nobody could sign in (see the earlier errors)")
 		}
 		return config, registry, nil, nil
 	}

@@ -131,15 +131,36 @@ type LoginRegistry struct {
 	entries []LoginEntry
 	byID    map[string]LoginEntry
 	limiter *loginLimiter
+	// disabled lists methods the loader refused to enable (see
+	// LoginMethodsOptions.SkipInvalidMethods). They cannot authenticate anyone.
+	disabled []DisabledLoginMethod
+}
+
+// DisabledLoginMethod records a configured method that was not enabled because
+// its own configuration is invalid, for example it names a connector that is not
+// in the connectors file.
+type DisabledLoginMethod struct {
+	ID string
+	// Resources are the resources the method was scoped to. A resource whose
+	// scoped login is disabled stays closed; it never falls back to a default.
+	Resources []string
+	// Reason is the validation error. It is for logs, not for public output.
+	Reason string
 }
 
 // NewLoginRegistry validates and registers the methods in order. The order is
 // the order shown on the login page.
 func NewLoginRegistry(entries ...LoginEntry) (*LoginRegistry, error) {
-	if len(entries) == 0 {
+	return newLoginRegistry(entries, nil)
+}
+
+// newLoginRegistry also records disabled methods. With disabled methods the
+// enabled list may be empty: the caller decides whether that is acceptable.
+func newLoginRegistry(entries []LoginEntry, disabled []DisabledLoginMethod) (*LoginRegistry, error) {
+	if len(entries) == 0 && len(disabled) == 0 {
 		return nil, errors.New("at least one login method is required")
 	}
-	registry := &LoginRegistry{byID: make(map[string]LoginEntry, len(entries)), limiter: newLoginLimiter()}
+	registry := &LoginRegistry{byID: make(map[string]LoginEntry, len(entries)), limiter: newLoginLimiter(), disabled: disabled}
 	for _, entry := range entries {
 		if entry.Method == nil {
 			return nil, errors.New("login method is nil")
@@ -154,13 +175,8 @@ func NewLoginRegistry(entries ...LoginEntry) (*LoginRegistry, error) {
 		if strings.TrimSpace(entry.Method.Label()) == "" {
 			return nil, fmt.Errorf("login method %q needs a label", id)
 		}
-		seen := map[string]bool{}
-		for _, resource := range entry.Resources {
-			u, err := url.Parse(resource)
-			if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.Fragment != "" || u.RawQuery != "" || strings.TrimSpace(resource) != resource || seen[resource] {
-				return nil, fmt.Errorf("login method %q resources must be unique absolute HTTP(S) URLs without userinfo, query or fragment", id)
-			}
-			seen[resource] = true
+		if err := validateLoginResources(id, entry.Resources); err != nil {
+			return nil, err
 		}
 		entry.Resources = append([]string(nil), entry.Resources...)
 		_, redirect := entry.Method.(RedirectLoginMethod)
@@ -186,6 +202,49 @@ func NewLoginRegistry(entries ...LoginEntry) (*LoginRegistry, error) {
 		return nil, err
 	}
 	return registry, nil
+}
+
+// validateLoginResources requires a method's resources to be unique absolute
+// HTTP(S) URLs, so scoping is unambiguous.
+func validateLoginResources(id string, resources []string) error {
+	seen := map[string]bool{}
+	for _, resource := range resources {
+		u, err := url.Parse(resource)
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.Fragment != "" || u.RawQuery != "" || strings.TrimSpace(resource) != resource || seen[resource] {
+			return fmt.Errorf("login method %q resources must be unique absolute HTTP(S) URLs without userinfo, query or fragment", id)
+		}
+		seen[resource] = true
+	}
+	return nil
+}
+
+// DisabledMethods lists the configured methods that were not enabled. It is
+// nil-safe.
+func (r *LoginRegistry) DisabledMethods() []DisabledLoginMethod {
+	if r == nil {
+		return nil
+	}
+	return append([]DisabledLoginMethod(nil), r.disabled...)
+}
+
+// EnabledCount is the number of methods that can authenticate someone.
+func (r *LoginRegistry) EnabledCount() int {
+	if r == nil {
+		return 0
+	}
+	return len(r.entries)
+}
+
+// disabledServes reports whether a disabled method was scoped to resource.
+func (r *LoginRegistry) disabledServes(resource string) bool {
+	for _, method := range r.disabled {
+		for _, scoped := range method.Resources {
+			if scoped == resource {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // checkUpstreamSessionResources allows one session-keeping method per
@@ -288,6 +347,11 @@ func (r *LoginRegistry) entriesForResource(resource string) []LoginEntry {
 	if len(scoped) > 0 {
 		return scoped
 	}
+	if r.disabledServes(resource) {
+		// The resource requires a login that is disabled. Falling back to a
+		// default method would let a weaker sign-in stand in for it.
+		return nil
+	}
 	return defaults
 }
 
@@ -313,7 +377,9 @@ func (r *LoginRegistry) servesResource(resource string) bool {
 			}
 		}
 	}
-	return false
+	// A disabled method still claims its resources, so they stay closed
+	// instead of being signed in through another flow.
+	return r.disabledServes(resource)
 }
 
 func (r *LoginRegistry) lookupForResource(id, resource string) (LoginEntry, bool) {
