@@ -103,7 +103,7 @@ docker run --rm -p 8080:8080 \
   -e MCP_AUTH_LOCAL_DEVELOPMENT=true \
   -e MCP_AUTH_REGISTRATION_ENABLED=true \
   -e MCP_AUTH_REQUIRE_HTTPS=false \
-  princekrroshan01/mcp-auth-server:0.8.0
+  princekrroshan01/mcp-auth-server:0.9.0
 ```
 
 Local-development only — no TLS, no identity provider. See
