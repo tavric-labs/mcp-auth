@@ -224,6 +224,9 @@ flowchart TB
     proxy --> resourceB
 ```
 
+To see how connectors, login methods and resource clients are loaded and wired,
+see [Architecture: how connectors plug in](connector-architecture.md).
+
 For exact runtime settings and operational constraints, see
 [Authorization server](auth-server.md). For SDK integration, see
 [Auth client SDKs](auth-client.md).

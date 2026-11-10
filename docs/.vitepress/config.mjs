@@ -12,11 +12,12 @@ export default defineDocsConfig({
   docsRoot: '/docs/',
   nav: [
     { text: 'Get started', link: '/use-cases', activeMatch: '^/(use-cases|README)' },
-    { text: 'Concepts', link: '/architecture', activeMatch: '^/(architecture|security-model)' },
+    { text: 'Concepts', link: '/architecture', activeMatch: '^/(architecture|connector-architecture|security-model)' },
     { text: 'Reference', items: [
       { text: 'Authorization server', link: '/auth-server' },
       { text: 'Login methods', link: '/login-methods' },
       { text: 'Connectors and login types', link: '/connectors' },
+      { text: 'How connectors plug in', link: '/connector-architecture' },
       { text: 'Auth client SDKs', link: '/auth-client' },
       { text: 'External credentials', link: '/external-credentials' } ] },
     { text: 'Guides', items: [
@@ -35,6 +36,7 @@ export default defineDocsConfig({
       { text: 'Server and configuration', link: '/auth-server' },
       { text: 'Login methods', link: '/login-methods' },
       { text: 'Connectors and login types', link: '/connectors' },
+      { text: 'How connectors plug in', link: '/connector-architecture' },
       { text: 'External credentials', link: '/external-credentials' } ] },
     { text: 'Resource servers', items: [
       { text: 'Auth client SDKs', link: '/auth-client' } ] },

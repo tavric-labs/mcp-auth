@@ -119,6 +119,7 @@ Local-development only — no TLS, no identity provider. See
 | See every connector and login type, or add a provider | [Connectors and login methods](docs/connectors.md) |
 | Protect an MCP resource server | [Auth client SDKs](docs/auth-client.md) |
 | Understand the protocol flow | [Architecture](docs/architecture.md) |
+| See how connectors plug in and where each file is read | [Architecture: how connectors plug in](docs/connector-architecture.md) |
 | Know what is guaranteed, and what I own | [Security model](docs/security-model.md) |
 | Run an end-to-end example | [Demo MCP + Keycloak](docs/demo-example.md) |
 | Build a Node.js MCP server | [TypeScript example](examples/typescript-mcp) |
