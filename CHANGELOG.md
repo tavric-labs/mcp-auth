@@ -5,6 +5,26 @@ Release notes for tagged versions are also published as
 
 ## Unreleased
 
+### Fixed
+
+- Fetching a Client ID Metadata Document from a dual-stack host (for example
+  `https://chatgpt.com/oauth/codex/client.json`) no longer fails with
+  `client metadata document could not be fetched` on a network with no working
+  IPv6 route. The fetch used to dial only the first resolved address, so an
+  unreachable AAAA answer consumed the whole 5 second timeout. All resolved
+  addresses must still be public, then the vetted addresses are tried IPv4
+  first with RFC 8305 style fallback and a 2 second per-address limit.
+
+### Changed
+
+- `/token` and `/authorize` cache successfully fetched Client ID Metadata
+  Documents in memory (`Cache-Control: max-age` clamped to 30 seconds to 1
+  hour, default 5 minutes, at most 256 entries, failures never cached), so a
+  token request no longer refetches the document from the client's host. The
+  requested `redirect_uri` is still validated on every request.
+- The `authorization_rejected` audit event for `client_metadata_rejected` now
+  carries a `detail` field with the safe rejection reason.
+
 ### Added
 
 - `docs/connector-architecture.md`: how connectors, login methods, resource logins and resource clients are loaded and used, with component and lifecycle diagrams, the files read at startup, failure behavior, how MCP Runtime supplies the files and a which-file-to-edit table. Linked from the README, the docs index and the site navigation.

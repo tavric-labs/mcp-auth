@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,8 +9,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestClientMetadataURLRejected(t *testing.T) {
@@ -195,3 +200,276 @@ func TestClientIDMetadataHostAllowlist(t *testing.T) {
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
+
+func withResolver(t *testing.T, ips ...string) {
+	t.Helper()
+	previous := lookupIPAddr
+	t.Cleanup(func() { lookupIPAddr = previous })
+	lookupIPAddr = func(context.Context, string) ([]net.IPAddr, error) {
+		var out []net.IPAddr
+		for _, value := range ips {
+			out = append(out, net.IPAddr{IP: net.ParseIP(value)})
+		}
+		return out, nil
+	}
+}
+
+func listenLoopback(t *testing.T) (port string) {
+	t.Helper()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	_, port, _ = net.SplitHostPort(listener.Addr().String())
+	return port
+}
+
+// A dual-stack host whose first answer is an unreachable family must still
+// connect over the other family: this is the chatgpt.com failure, where the
+// pod has no IPv6 route and only the first address used to be tried.
+func TestPublicOnlyDialFallsBackWhenFirstAddressUnreachable(t *testing.T) {
+	port := listenLoopback(t)
+	withResolver(t, "::1", "127.0.0.1")
+	dial := publicOnlyDialContext(true)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, err := dial(ctx, "tcp", net.JoinHostPort("dual.example", port))
+	if err != nil {
+		t.Fatalf("dial did not fall back to the reachable address: %v", err)
+	}
+	conn.Close()
+}
+
+// A first address that blackholes must not consume the whole deadline.
+func TestDialVettedPerAddressTimeoutLetsSecondAddressSucceed(t *testing.T) {
+	blackhole := net.ParseIP("2001:db8::1")
+	good := net.ParseIP("192.0.2.1")
+	var attempted []string
+	var mu sync.Mutex
+	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, _, _ := net.SplitHostPort(address)
+		mu.Lock()
+		attempted = append(attempted, host)
+		mu.Unlock()
+		if host == blackhole.String() {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		client, server := net.Pipe()
+		t.Cleanup(func() { server.Close() })
+		return client, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	conn, err := dialVetted(ctx, "tcp", "443", []net.IP{blackhole, good}, dial, 300*time.Millisecond, 20*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("fallback took %s", elapsed)
+	}
+	for _, host := range attempted {
+		if host != blackhole.String() && host != good.String() {
+			t.Fatalf("dialed unvetted address %s", host)
+		}
+	}
+}
+
+func TestDialVettedPrefersIPv4AndInterleaves(t *testing.T) {
+	ips := []net.IP{net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"), net.ParseIP("192.0.2.1"), net.ParseIP("192.0.2.2")}
+	got := orderHappyEyeballs(ips)
+	want := []string{"192.0.2.1", "2001:db8::1", "192.0.2.2", "2001:db8::2"}
+	for i := range want {
+		if got[i].String() != want[i] {
+			t.Fatalf("order[%d] = %s, want %s", i, got[i], want[i])
+		}
+	}
+}
+
+func TestDialVettedAllFail(t *testing.T) {
+	dial := func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("refused") }
+	_, err := dialVetted(context.Background(), "tcp", "443", []net.IP{net.ParseIP("192.0.2.1"), net.ParseIP("2001:db8::1")}, dial, time.Second, time.Millisecond)
+	if err == nil {
+		t.Fatal("expected an error when every address fails")
+	}
+}
+
+// One blocked address in the record set refuses the whole set, even when the
+// other address is public and reachable.
+func TestPublicOnlyDialRefusesMixedPublicAndPrivate(t *testing.T) {
+	withResolver(t, "93.184.216.34", "10.0.0.5")
+	dial := publicOnlyDialContext(false)
+	if conn, err := dial(context.Background(), "tcp", "mixed.example:443"); err == nil {
+		conn.Close()
+		t.Fatal("dial accepted a record set containing a private address")
+	}
+}
+
+func cimdTestServer(t *testing.T, handler func(w http.ResponseWriter, r *http.Request, clientID string)) (*Server, string, *int32) {
+	t.Helper()
+	var hits int32
+	var clientID string
+	metadata := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		handler(w, r, clientID)
+	}))
+	t.Cleanup(metadata.Close)
+	clientID = metadata.URL + "/client.json"
+	instance := testServer(t)
+	client := metadata.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	instance.ClientMetadataClient = client
+	instance.Config.ClientIDMetadataEnabled = true
+	return instance, clientID, &hits
+}
+
+func goodDocument(w http.ResponseWriter, _ *http.Request, clientID string) {
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"client_id": clientID, "redirect_uris": []string{"http://127.0.0.1/callback"}, "token_endpoint_auth_method": "none",
+	})
+}
+
+func TestClientMetadataCacheServesSecondCall(t *testing.T) {
+	instance, clientID, hits := cimdTestServer(t, goodDocument)
+	now := time.Now()
+	instance.now = func() time.Time { return now }
+	for i := 0; i < 3; i++ {
+		client, err := instance.fetchClientMetadata(context.Background(), clientID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The redirect decision is made against the cached document each time.
+		if !instance.clientRedirectPermitted(client, "http://127.0.0.1:5555/callback") || instance.clientRedirectPermitted(client, "http://127.0.0.1:5555/other") {
+			t.Fatal("redirect_uri was not validated against the cached document")
+		}
+	}
+	if got := atomic.LoadInt32(hits); got != 1 {
+		t.Fatalf("metadata server hit %d times, want 1", got)
+	}
+	now = now.Add(clientMetadataDefaultTTL + time.Second)
+	if _, err := instance.fetchClientMetadata(context.Background(), clientID); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(hits); got != 2 {
+		t.Fatalf("after TTL expiry hits = %d, want 2", got)
+	}
+}
+
+func TestClientMetadataCacheDoesNotCacheFailures(t *testing.T) {
+	fail := int32(1)
+	instance, clientID, hits := cimdTestServer(t, func(w http.ResponseWriter, r *http.Request, id string) {
+		if atomic.LoadInt32(&fail) == 1 {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		goodDocument(w, r, id)
+	})
+	if _, err := instance.fetchClientMetadata(context.Background(), clientID); err == nil {
+		t.Fatal("expected failure")
+	}
+	atomic.StoreInt32(&fail, 0)
+	if _, err := instance.fetchClientMetadata(context.Background(), clientID); err != nil {
+		t.Fatalf("failure was cached: %v", err)
+	}
+	if got := atomic.LoadInt32(hits); got != 2 {
+		t.Fatalf("hits = %d, want 2", got)
+	}
+}
+
+func TestClientMetadataCacheHonoursCacheControl(t *testing.T) {
+	cases := map[string]time.Duration{
+		"":                     clientMetadataDefaultTTL,
+		"public, max-age=600":  10 * time.Minute,
+		"max-age=1":            clientMetadataMinTTL,
+		"max-age=999999":       clientMetadataMaxTTL,
+		"no-store":             0,
+		"max-age=0":            0,
+		"private, max-age=abc": clientMetadataDefaultTTL,
+	}
+	for header, want := range cases {
+		if got := clientMetadataTTL(header); got != want {
+			t.Errorf("clientMetadataTTL(%q) = %s, want %s", header, got, want)
+		}
+	}
+	instance, clientID, hits := cimdTestServer(t, func(w http.ResponseWriter, r *http.Request, id string) {
+		w.Header().Set("Cache-Control", "no-store")
+		goodDocument(w, r, id)
+	})
+	for i := 0; i < 2; i++ {
+		if _, err := instance.fetchClientMetadata(context.Background(), clientID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := atomic.LoadInt32(hits); got != 2 {
+		t.Fatalf("no-store document was cached: hits = %d", got)
+	}
+}
+
+func TestClientMetadataCacheCoalescesConcurrentFetches(t *testing.T) {
+	release := make(chan struct{})
+	instance, clientID, hits := cimdTestServer(t, func(w http.ResponseWriter, r *http.Request, id string) {
+		<-release
+		goodDocument(w, r, id)
+	})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := instance.fetchClientMetadata(context.Background(), clientID); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	time.Sleep(200 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	if got := atomic.LoadInt32(hits); got != 1 {
+		t.Fatalf("concurrent fetches hit the server %d times, want 1", got)
+	}
+}
+
+func TestClientMetadataCacheIsBounded(t *testing.T) {
+	cache := newClientMetadataCache(time.Now)
+	for i := 0; i < clientMetadataCacheSize*2; i++ {
+		cache.mu.Lock()
+		cache.store(strconv.Itoa(i), Client{ID: strconv.Itoa(i)}, time.Hour)
+		cache.mu.Unlock()
+	}
+	if len(cache.entries) > clientMetadataCacheSize {
+		t.Fatalf("cache holds %d entries, limit %d", len(cache.entries), clientMetadataCacheSize)
+	}
+}
+
+func TestAuthorizeClientMetadataRejectionAuditsDetail(t *testing.T) {
+	var output bytes.Buffer
+	config := Config{Issuer: "http://localhost:8080", Resources: []string{"http://localhost:8081/mcp"}, AccessTokenTTL: time.Minute, AllowedScopes: []string{"tools:read"}, LocalDevelopment: true, LocalSubject: "test-user", ClientIDMetadataEnabled: true}
+	instance, err := NewServer(config, NewMemoryStore(), LocalIdentityProvider{Subject: "test-user"}, nil, &output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "no", http.StatusTeapot) }))
+	defer metadata.Close()
+	client := metadata.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	instance.ClientMetadataClient = client
+	target := "/authorize?client_id=" + url.QueryEscape(metadata.URL+"/c.json") + "&redirect_uri=http%3A%2F%2F127.0.0.1%3A9%2Fcallback"
+	recorder := httptest.NewRecorder()
+	instance.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
+	logged := output.String()
+	if !strings.Contains(logged, `"reason":"client_metadata_rejected"`) || !strings.Contains(logged, `"detail":"client metadata document returned HTTP 418"`) {
+		t.Fatalf("audit event lacks the rejection detail: %s", logged)
+	}
+}

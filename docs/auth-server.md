@@ -399,13 +399,32 @@ entry must be a redirect this server would register, and the request's
 allowlist). `token_endpoint_auth_method` must be `none` or omitted. The same
 `allowed_client_redirect_uris` list applies when it is set.
 
-The fetch is HTTPS only, does not follow redirects, times out after 5 seconds,
+The fetch is HTTPS only, does not follow redirects, times out after 5 seconds overall,
 and reads at most 1 MiB. URLs with userinfo or a fragment are rejected, as are
 non-loopback IP literals. The transport resolves the hostname and checks every
 address at dial time, refusing private, link-local and other blocked ranges,
 including mixed public/private answers. The connection uses the validated
-address rather than resolving it again. Loopback fetches are allowed only in
-local-development mode. `MCP_AUTH_CLIENT_ID_METADATA_HOSTS` can further restrict
+address rather than resolving it again. When a host has several addresses, all
+of them must pass that check, and the vetted addresses are then tried
+Happy-Eyeballs style (RFC 8305): IPv4 first, alternating families, a new attempt
+every 250 ms, at most 2 seconds per address, first connection wins. A host whose
+IPv6 route is dead therefore falls back to IPv4 instead of consuming the whole
+timeout. Loopback fetches are allowed only in
+local-development mode.
+
+A successfully fetched document is cached in memory per `client_id` so `/token`
+does not refetch it on every request. The lifetime follows `Cache-Control:
+max-age` clamped to 30 seconds to 1 hour (default 5 minutes); `no-store`,
+`no-cache` and `max-age=0` disable caching. At most 256 documents are kept,
+failures are never cached, and the request's `redirect_uri` is still checked
+against the document on every request. Rejections are audited as
+`authorization_rejected` with `reason` `client_metadata_rejected` and a `detail`
+that says whether the fetch failed, returned an HTTP error or was invalid.
+
+**Operator note:** the auth-server pod needs working outbound HTTPS to each
+client's metadata host (DNS plus egress network policy). A blocked or
+unroutable path shows up as `client metadata document could not be fetched`
+after the 5 second timeout. `MCP_AUTH_CLIENT_ID_METADATA_HOSTS` can further restrict
 the permitted metadata hosts.
 
 **A deliberate deviation from the MCP authorization spec.** That spec states

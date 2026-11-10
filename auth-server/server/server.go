@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -42,7 +43,10 @@ type Server struct {
 	// ClientMetadataClient fetches OAuth Client ID Metadata Documents.
 	// Nil uses a client with a short timeout that does not follow redirects.
 	ClientMetadataClient *http.Client
-	now                  func() time.Time
+
+	metadataCacheOnce sync.Once
+	metadataCache     *clientMetadataCache
+	now               func() time.Time
 }
 
 type AuthorizationRequest struct {
@@ -857,6 +861,7 @@ func (s *Server) auditAuthorizationFailure(request AuthorizationRequest, err err
 			return
 		}
 		attrs["reason"] = "client_metadata_rejected"
+		attrs["detail"] = metadata.detail
 	}
 	s.Audit.Event("authorization_rejected", "failure", attrs)
 }

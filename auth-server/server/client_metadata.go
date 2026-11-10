@@ -9,7 +9,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -105,27 +107,130 @@ func newClientMetadataClient(allowLoopback bool) *http.Client {
 // also closes the rebinding window between validation and connection. Every
 // resolved address must be allowed, so a record set mixing a public and a
 // private answer is refused rather than raced.
+// lookupIPAddr resolves the metadata host. It is a variable only so tests can
+// supply a record set; production always uses the system resolver.
+var lookupIPAddr = net.DefaultResolver.LookupIPAddr
+
 func publicOnlyDialContext(allowLoopback bool) func(context.Context, string, string) (net.Conn, error) {
-	dialer := &net.Dialer{Timeout: clientMetadataTimeout}
+	dialer := &net.Dialer{}
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
 			return nil, err
 		}
-		addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		addrs, err := lookupIPAddr(ctx, host)
 		if err != nil {
 			return nil, err
 		}
 		if len(addrs) == 0 {
 			return nil, errors.New("client metadata host did not resolve")
 		}
+		ips := make([]net.IP, 0, len(addrs))
 		for _, addr := range addrs {
 			if !dialableIP(addr.IP, allowLoopback) {
 				return nil, errors.New("client metadata host resolves to a blocked address")
 			}
+			ips = append(ips, addr.IP)
 		}
-		return dialer.DialContext(ctx, network, net.JoinHostPort(addrs[0].IP.String(), port))
+		return dialVetted(ctx, network, port, ips, dialer.DialContext, metadataDialAttemptTimeout, metadataDialStagger)
 	}
+}
+
+const (
+	// metadataDialAttemptTimeout bounds one address so a family with no route
+	// cannot spend the whole clientMetadataTimeout.
+	metadataDialAttemptTimeout = 2 * time.Second
+	// metadataDialStagger is the RFC 8305 connection attempt delay.
+	metadataDialStagger = 250 * time.Millisecond
+)
+
+// orderHappyEyeballs puts IPv4 first and alternates families after that
+// (RFC 8305 section 4), keeping the resolver's order within a family.
+func orderHappyEyeballs(ips []net.IP) []net.IP {
+	var v4, v6 []net.IP
+	for _, ip := range ips {
+		if ip.To4() != nil {
+			v4 = append(v4, ip)
+		} else {
+			v6 = append(v6, ip)
+		}
+	}
+	out := make([]net.IP, 0, len(ips))
+	for i := 0; i < len(v4) || i < len(v6); i++ {
+		if i < len(v4) {
+			out = append(out, v4[i])
+		}
+		if i < len(v6) {
+			out = append(out, v6[i])
+		}
+	}
+	return out
+}
+
+// dialVetted connects to one of ips, which the caller has already checked with
+// dialableIP; it dials only those addresses and never resolves a name. Attempts
+// start one per stagger, or immediately when the previous one failed, each
+// bounded by perAttempt. The first success wins and the others are cancelled.
+func dialVetted(ctx context.Context, network, port string, ips []net.IP, dial func(context.Context, string, string) (net.Conn, error), perAttempt, stagger time.Duration) (net.Conn, error) {
+	ordered := orderHappyEyeballs(ips)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	results := make(chan result, len(ordered))
+	launch := func(ip net.IP) {
+		go func() {
+			attemptCtx, attemptCancel := context.WithTimeout(ctx, perAttempt)
+			defer attemptCancel()
+			conn, err := dial(attemptCtx, network, net.JoinHostPort(ip.String(), port))
+			results <- result{conn, err}
+		}()
+	}
+	var firstErr error
+	started, finished := 0, 0
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	for finished < len(ordered) {
+		select {
+		case <-timer.C:
+			if started < len(ordered) {
+				launch(ordered[started])
+				started++
+				timer.Reset(stagger)
+			}
+		case res := <-results:
+			finished++
+			if res.err == nil {
+				// Drain the losers so a late success does not leak a connection.
+				go func(remaining int) {
+					for ; remaining > 0; remaining-- {
+						if late := <-results; late.conn != nil {
+							late.conn.Close()
+						}
+					}
+				}(len(ordered) - finished)
+				return res.conn, nil
+			}
+			if firstErr == nil {
+				firstErr = res.err
+			}
+			if started < len(ordered) && started == finished {
+				// Everything in flight failed: try the next address now.
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(0)
+			}
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return nil, firstErr
 }
 
 // dialableIP reports whether one resolved address may be fetched. net.IP's own
@@ -159,6 +264,10 @@ func dialableIP(ip net.IP, allowLoopback bool) bool {
 // registration stays available for clients that are not identified by a URL.
 // Only token_endpoint_auth_method "none" is accepted: a metadata document
 // does not establish a client secret with this server.
+//
+// The URL and host checks run on every call. A successfully fetched document is
+// cached (see clientMetadataCache) so /token does not refetch it per request;
+// callers still check the requested redirect_uri against the returned client.
 func (s *Server) fetchClientMetadata(ctx context.Context, clientID string) (Client, error) {
 	if err := validateClientMetadataURL(clientID); err != nil {
 		return Client{}, &clientMetadataError{detail: err.Error()}
@@ -166,11 +275,22 @@ func (s *Server) fetchClientMetadata(ctx context.Context, clientID string) (Clie
 	if err := s.allowedMetadataHost(clientID); err != nil {
 		return Client{}, &clientMetadataError{detail: err.Error()}
 	}
+	s.metadataCacheOnce.Do(func() {
+		now := s.now
+		if now == nil {
+			now = time.Now
+		}
+		s.metadataCache = newClientMetadataCache(now)
+	})
+	return s.metadataCache.get(ctx, clientID, s.fetchClientMetadataDocument)
+}
+
+func (s *Server) fetchClientMetadataDocument(ctx context.Context, clientID string) (Client, time.Duration, error) {
 	ctx, cancel := context.WithTimeout(ctx, clientMetadataTimeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, clientID, nil)
 	if err != nil {
-		return Client{}, &clientMetadataError{detail: "client metadata URL is not fetchable"}
+		return Client{}, 0, &clientMetadataError{detail: "client metadata URL is not fetchable"}
 	}
 	request.Header.Set("Accept", "application/json")
 	// The URL is the client_id, so this flow is the feature rather than a
@@ -185,11 +305,11 @@ func (s *Server) fetchClientMetadata(ctx context.Context, clientID string) (Clie
 	// TestClientMetadataFetchRefusesPrivateHostname.
 	response, err := s.metadataHTTPClient().Do(request) // codeql[go/request-forgery]
 	if err != nil {
-		return Client{}, &clientMetadataError{detail: "client metadata document could not be fetched"}
+		return Client{}, 0, &clientMetadataError{detail: "client metadata document could not be fetched"}
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return Client{}, &clientMetadataError{detail: fmt.Sprintf("client metadata document returned HTTP %d", response.StatusCode)}
+		return Client{}, 0, &clientMetadataError{detail: fmt.Sprintf("client metadata document returned HTTP %d", response.StatusCode)}
 	}
 	var document struct {
 		ClientID          string   `json:"client_id"`
@@ -198,17 +318,17 @@ func (s *Server) fetchClientMetadata(ctx context.Context, clientID string) (Clie
 		TokenEndpointAuth string   `json:"token_endpoint_auth_method"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxJWKSResponseBytes)).Decode(&document); err != nil {
-		return Client{}, &clientMetadataError{detail: "client metadata document is not valid JSON"}
+		return Client{}, 0, &clientMetadataError{detail: "client metadata document is not valid JSON"}
 	}
 	if document.ClientID != clientID {
-		return Client{}, &clientMetadataError{detail: "client metadata client_id does not match the requested URL"}
+		return Client{}, 0, &clientMetadataError{detail: "client metadata client_id does not match the requested URL"}
 	}
 	if len(document.RedirectURIs) == 0 {
-		return Client{}, &clientMetadataError{detail: "client metadata document has no redirect_uris"}
+		return Client{}, 0, &clientMetadataError{detail: "client metadata document has no redirect_uris"}
 	}
 	for _, redirectURI := range document.RedirectURIs {
 		if !validRedirect(redirectURI) {
-			return Client{}, &clientMetadataError{detail: "client metadata document has an invalid redirect_uri"}
+			return Client{}, 0, &clientMetadataError{detail: "client metadata document has an invalid redirect_uri"}
 		}
 	}
 	authMethod := document.TokenEndpointAuth
@@ -216,14 +336,145 @@ func (s *Server) fetchClientMetadata(ctx context.Context, clientID string) (Clie
 		authMethod = "none"
 	}
 	if authMethod != "none" {
-		return Client{}, &clientMetadataError{detail: "client metadata documents must use token_endpoint_auth_method none"}
+		return Client{}, 0, &clientMetadataError{detail: "client metadata documents must use token_endpoint_auth_method none"}
 	}
 	return Client{
 		ID:                clientID,
 		Name:              document.ClientName,
 		RedirectURIs:      document.RedirectURIs,
 		TokenEndpointAuth: authMethod,
-	}, nil
+	}, clientMetadataTTL(response.Header.Get("Cache-Control")), nil
+}
+
+const (
+	clientMetadataDefaultTTL = 5 * time.Minute
+	clientMetadataMinTTL     = 30 * time.Second
+	clientMetadataMaxTTL     = time.Hour
+	clientMetadataCacheSize  = 256
+)
+
+// clientMetadataTTL reads Cache-Control: no-store and no-cache disable caching
+// (zero), max-age is honoured within [30s, 1h], and anything else uses 5 minutes.
+func clientMetadataTTL(cacheControl string) time.Duration {
+	ttl := clientMetadataDefaultTTL
+	for _, directive := range strings.Split(strings.ToLower(cacheControl), ",") {
+		directive = strings.TrimSpace(directive)
+		switch {
+		case directive == "no-store" || directive == "no-cache":
+			return 0
+		case strings.HasPrefix(directive, "max-age="):
+			seconds, err := strconv.ParseInt(strings.TrimPrefix(directive, "max-age="), 10, 64)
+			if err != nil || seconds < 0 {
+				continue
+			}
+			if seconds == 0 {
+				return 0
+			}
+			ttl = time.Duration(seconds) * time.Second
+			if ttl < clientMetadataMinTTL {
+				ttl = clientMetadataMinTTL
+			}
+			if ttl > clientMetadataMaxTTL {
+				ttl = clientMetadataMaxTTL
+			}
+		}
+	}
+	return ttl
+}
+
+type clientMetadataEntry struct {
+	client  Client
+	expires time.Time
+}
+
+type clientMetadataFlight struct {
+	done   chan struct{}
+	client Client
+	err    error
+}
+
+// clientMetadataCache keeps validated Client ID Metadata Documents in memory,
+// keyed by client_id. Only successes are stored, the size is bounded, and
+// concurrent fetches of one client_id share a single request.
+type clientMetadataCache struct {
+	now     func() time.Time
+	mu      sync.Mutex
+	entries map[string]clientMetadataEntry
+	flights map[string]*clientMetadataFlight
+}
+
+func newClientMetadataCache(now func() time.Time) *clientMetadataCache {
+	return &clientMetadataCache{now: now, entries: map[string]clientMetadataEntry{}, flights: map[string]*clientMetadataFlight{}}
+}
+
+func cloneClient(c Client) Client {
+	c.RedirectURIs = append([]string(nil), c.RedirectURIs...)
+	return c
+}
+
+func (c *clientMetadataCache) get(ctx context.Context, clientID string, fetch func(context.Context, string) (Client, time.Duration, error)) (Client, error) {
+	c.mu.Lock()
+	if entry, ok := c.entries[clientID]; ok {
+		if c.now().Before(entry.expires) {
+			c.mu.Unlock()
+			return cloneClient(entry.client), nil
+		}
+		delete(c.entries, clientID)
+	}
+	if flight, ok := c.flights[clientID]; ok {
+		c.mu.Unlock()
+		select {
+		case <-flight.done:
+			if flight.err != nil {
+				return Client{}, flight.err
+			}
+			return cloneClient(flight.client), nil
+		case <-ctx.Done():
+			return Client{}, &clientMetadataError{detail: "client metadata document could not be fetched"}
+		}
+	}
+	flight := &clientMetadataFlight{done: make(chan struct{})}
+	c.flights[clientID] = flight
+	c.mu.Unlock()
+
+	client, ttl, err := fetch(ctx, clientID)
+
+	c.mu.Lock()
+	delete(c.flights, clientID)
+	flight.client, flight.err = client, err
+	if err == nil && ttl > 0 {
+		c.store(clientID, client, ttl)
+	}
+	c.mu.Unlock()
+	close(flight.done)
+	if err != nil {
+		return Client{}, err
+	}
+	return cloneClient(client), nil
+}
+
+// store inserts under c.mu, dropping expired entries and then the entry that
+// expires soonest when the cache is full.
+func (c *clientMetadataCache) store(clientID string, client Client, ttl time.Duration) {
+	now := c.now()
+	if len(c.entries) >= clientMetadataCacheSize {
+		for key, entry := range c.entries {
+			if !now.Before(entry.expires) {
+				delete(c.entries, key)
+			}
+		}
+	}
+	for len(c.entries) >= clientMetadataCacheSize {
+		var oldest string
+		var oldestExpiry time.Time
+		for key, entry := range c.entries {
+			if oldest == "" || entry.expires.Before(oldestExpiry) {
+				oldest, oldestExpiry = key, entry.expires
+			}
+		}
+		delete(c.entries, oldest)
+	}
+	c.entries[clientID] = clientMetadataEntry{client: cloneClient(client), expires: now.Add(ttl)}
 }
 
 func (s *Server) resolveClient(ctx context.Context, clientID string) (Client, error) {
