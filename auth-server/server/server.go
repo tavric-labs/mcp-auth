@@ -46,7 +46,7 @@ type Server struct {
 
 	metadataCacheOnce sync.Once
 	metadataCache     *clientMetadataCache
-	now                  func() time.Time
+	now               func() time.Time
 }
 
 type AuthorizationRequest struct {
