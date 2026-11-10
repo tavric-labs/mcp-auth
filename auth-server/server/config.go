@@ -67,6 +67,10 @@ type Config struct {
 	// token exchange. A deployment using LoginMethodsFile lists such methods
 	// there instead, with `resources`.
 	ResourceLoginsFile string
+	// StrictLoginMethods (MCP_AUTH_STRICT_LOGIN_METHODS=true) makes any invalid
+	// login method fail startup. By default an invalid method is disabled and
+	// logged while the valid ones keep working.
+	StrictLoginMethods bool
 	// LoginTTL bounds how long a person has to finish signing in, from the
 	// login page or the upstream provider back to this server. It is longer
 	// than AuthorizationCodeTTL because it covers typing a password.
@@ -353,6 +357,7 @@ func ConfigFromEnv() Config {
 		ConnectorName:               os.Getenv("MCP_AUTH_CONNECTOR"),
 		LoginMethodsFile:            os.Getenv("MCP_AUTH_LOGIN_METHODS_FILE"),
 		ResourceLoginsFile:          os.Getenv("MCP_AUTH_RESOURCE_LOGINS_FILE"),
+		StrictLoginMethods:          strings.EqualFold(os.Getenv("MCP_AUTH_STRICT_LOGIN_METHODS"), "true"),
 		LoginTTL:                    durationEnv("MCP_AUTH_LOGIN_TTL", defaultLoginTTL),
 		StoreBackend:                env("MCP_AUTH_STORE", "memory"),
 		DatabaseURL:                 os.Getenv("MCP_AUTH_DATABASE_URL"),

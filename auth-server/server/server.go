@@ -259,8 +259,23 @@ func (s *Server) jwks(w http.ResponseWriter, r *http.Request) {
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
+
+// ready stays 200 while some login methods are disabled: the server still
+// signs people in through the valid ones. The disabled ids are listed, without
+// reasons or connector names, so a probe or an operator can see the problem; the
+// reason is in the startup log.
 func (s *Server) ready(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	var disabled []string
+	for _, registry := range []*LoginRegistry{s.loginRegistry(), s.ResourceLogins} {
+		for _, method := range registry.DisabledMethods() {
+			disabled = append(disabled, method.ID)
+		}
+	}
+	if len(disabled) == 0 {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "login_methods_disabled": disabled})
 }
 
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {

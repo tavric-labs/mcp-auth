@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 )
 
@@ -17,8 +18,8 @@ import (
 //	]}
 //
 // Each entry has the common fields below plus the fields of its type. Unknown
-// fields are an error, so a misspelled setting fails startup instead of being
-// ignored.
+// fields are an error, so a misspelled setting is never silently ignored: it
+// fails the load, or with SkipInvalidMethods it disables that one method.
 type loginMethodsDocument struct {
 	Methods []json.RawMessage `json:"methods"`
 }
@@ -90,7 +91,22 @@ type LoginMethodsOptions struct {
 	// AllowInsecure permits http endpoints and plaintext ldap://, for local
 	// development.
 	AllowInsecure bool
+	// SkipInvalidMethods disables a method whose own configuration is invalid
+	// (it names a connector missing from the connectors file, has a misspelled
+	// or unsupported setting, and so on) instead of failing the whole load. The
+	// method is logged at ERROR level and listed by LoginRegistry.DisabledMethods.
+	// It never skips what must fail closed: an unparsable file, a missing,
+	// invalid or duplicate id, invalid resources or an unreadable connectors
+	// file. Off by default, so library callers keep fail-fast loading.
+	SkipInvalidMethods bool
 }
+
+// loginFatalError marks an error that stays fatal even when invalid methods are
+// skipped.
+type loginFatalError struct{ err error }
+
+func (e loginFatalError) Error() string { return e.err.Error() }
+func (e loginFatalError) Unwrap() error { return e.err }
 
 // LoadLoginMethods reads the file and builds the registry.
 func LoadLoginMethods(path string, options LoginMethodsOptions) (*LoginRegistry, error) {
@@ -128,6 +144,8 @@ func ParseLoginMethods(data []byte, options LoginMethodsOptions) (*LoginRegistry
 		return nil, fmt.Errorf("parse login methods: %w", err)
 	}
 	var entries []LoginEntry
+	var disabled []DisabledLoginMethod
+	seenIDs := map[string]bool{}
 	var connectors map[string]ConnectorConfig
 	for index, raw := range document.Methods {
 		var common loginCommon
@@ -137,6 +155,21 @@ func ParseLoginMethods(data []byte, options LoginMethodsOptions) (*LoginRegistry
 		if common.ID == "" {
 			return nil, fmt.Errorf("login method %d: id is required", index+1)
 		}
+		if options.SkipInvalidMethods {
+			// Checks that keep a skipped method from weakening anything: its
+			// identity and scoping must be well formed, so a disabled method
+			// can be named and its resources stay closed.
+			if !loginMethodIDPattern.MatchString(common.ID) {
+				return nil, fmt.Errorf("login method id %q must be 1-32 lowercase letters, digits or hyphens", common.ID)
+			}
+			if err := validateLoginResources(common.ID, common.Resources); err != nil {
+				return nil, err
+			}
+		}
+		if seenIDs[common.ID] {
+			return nil, fmt.Errorf("login method id %q is used twice", common.ID)
+		}
+		seenIDs[common.ID] = true
 		label := common.Label
 		var keepConnector *ConnectorConfig
 		var usedConnector string
@@ -156,7 +189,7 @@ func ParseLoginMethods(data []byte, options LoginMethodsOptions) (*LoginRegistry
 					}
 					loaded, err := LoadConnectorsWithOptions(options.ConnectorsFile, options.AllowInsecure)
 					if err != nil {
-						return nil, err
+						return nil, loginFatalError{err}
 					}
 					connectors = loaded
 				}
@@ -222,7 +255,14 @@ func ParseLoginMethods(data []byte, options LoginMethodsOptions) (*LoginRegistry
 			}
 		}()
 		if err != nil {
-			return nil, fmt.Errorf("login method %q: %w", common.ID, err)
+			var fatal loginFatalError
+			if !options.SkipInvalidMethods || errors.As(err, &fatal) {
+				return nil, fmt.Errorf("login method %q: %w", common.ID, err)
+			}
+			slog.Error("login method disabled: it cannot authenticate anyone until its configuration is fixed",
+				"method", common.ID, "type", common.Type, "resources", common.Resources, "error", err.Error())
+			disabled = append(disabled, DisabledLoginMethod{ID: common.ID, Resources: append([]string(nil), common.Resources...), Reason: err.Error()})
+			continue
 		}
 		prefix := common.ID + ":"
 		if common.SubjectPrefix != nil {
@@ -233,7 +273,14 @@ func ParseLoginMethods(data []byte, options LoginMethodsOptions) (*LoginRegistry
 			KeepUpstreamSession: keepConnector != nil, UpstreamConnector: keepConnector, ConnectorName: usedConnector,
 		})
 	}
-	return NewLoginRegistry(entries...)
+	registry, err := newLoginRegistry(entries, disabled)
+	if err != nil {
+		return nil, err
+	}
+	if len(disabled) > 0 {
+		slog.Error("some login methods are disabled", "login_methods_disabled", len(disabled), "login_methods_enabled", len(entries))
+	}
+	return registry, nil
 }
 
 func defaultLabel(label, fallback string) string {

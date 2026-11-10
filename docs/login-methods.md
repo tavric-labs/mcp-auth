@@ -372,6 +372,22 @@ accounts are not linked.
 - **Audit events** `login` (with `method` and `outcome`) record each attempt.
   They never contain passwords or usernames.
 
+## When a method is misconfigured
+
+A method whose own configuration is invalid (a connector name that is not in
+the connectors file, a misspelled field, a missing secret variable) is
+**disabled** instead of stopping the server. It is logged at ERROR level, it is
+not offered on the login page, a resource scoped only to it is refused with
+`access_denied` (it never falls back to another method), and `/readyz` lists its
+id under `login_methods_disabled`. Problems that could weaken sign-in, such as
+duplicate ids or overlapping subject prefixes, still stop startup, as does a
+login-methods file with no usable method. Set `MCP_AUTH_STRICT_LOGIN_METHODS=true`
+to fail fast on any invalid method. The exact lists are in
+[Invalid methods are disabled](connectors.md#invalid-methods-are-disabled-not-fatal).
+
+For every connector and login type, the connector schema and how to add a
+provider, see [Connectors, login methods and resource logins](connectors.md).
+
 ## Add another method
 
 A method implements one of two small interfaces in
@@ -388,5 +404,6 @@ A method implements one of two small interfaces in
   like a wrong password.
 
 Register it in `ParseLoginMethods` with a config type, the same way `ldap`
-does in `login_config.go`. The registry handles the page, the state, subject
+does in `login_config.go` (step by step in
+[Writing a custom connector](connectors.md#writing-a-custom-connector)). The registry handles the page, the state, subject
 prefixing, throttling and audit.

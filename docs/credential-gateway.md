@@ -82,6 +82,13 @@ prefix `form-<id>:`.
 
 ## Configure mcp-auth
 
+The sign-in form is not a connector type in mcp-auth: it is a plain OAuth 2.0
+connector plus an `oidc` resource login. See
+[Connectors, login methods and resource logins](connectors.md#the-credential-form-is-not-a-connector-type).
+If a resource login names a connector that is missing, that login is disabled
+(logged, listed in `/readyz`) and its resource cannot sign in; the rest of the
+server keeps working.
+
 mcp-auth needs four things per service, all in its existing configuration. Use the
 naming conventions the gateway also uses: the sign-in client id
 is `login-<id>` and the subject prefix is `form-<id>:`.

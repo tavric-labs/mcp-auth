@@ -16,6 +16,7 @@ export default defineDocsConfig({
     { text: 'Reference', items: [
       { text: 'Authorization server', link: '/auth-server' },
       { text: 'Login methods', link: '/login-methods' },
+      { text: 'Connectors and login types', link: '/connectors' },
       { text: 'Auth client SDKs', link: '/auth-client' },
       { text: 'External credentials', link: '/external-credentials' } ] },
     { text: 'Guides', items: [
@@ -33,6 +34,7 @@ export default defineDocsConfig({
     { text: 'Authorization server', items: [
       { text: 'Server and configuration', link: '/auth-server' },
       { text: 'Login methods', link: '/login-methods' },
+      { text: 'Connectors and login types', link: '/connectors' },
       { text: 'External credentials', link: '/external-credentials' } ] },
     { text: 'Resource servers', items: [
       { text: 'Auth client SDKs', link: '/auth-client' } ] },
