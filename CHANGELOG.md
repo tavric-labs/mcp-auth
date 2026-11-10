@@ -5,6 +5,8 @@ Release notes for tagged versions are also published as
 
 ## Unreleased
 
+## [0.9.0] - 2026-11-10
+
 ### Changed (behavior)
 
 - **A login method with invalid configuration no longer stops the server.**
@@ -36,4 +38,4 @@ Release notes for tagged versions are also published as
 
 ### Fixed
 
-- Documentation image tags now point at `0.8.0` instead of `0.6.0`.
+- Documentation image tags now point at `0.9.0` instead of `0.6.0`.
