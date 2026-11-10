@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,8 +9,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -311,5 +314,162 @@ func TestPublicOnlyDialRefusesMixedPublicAndPrivate(t *testing.T) {
 	if conn, err := dial(context.Background(), "tcp", "mixed.example:443"); err == nil {
 		conn.Close()
 		t.Fatal("dial accepted a record set containing a private address")
+	}
+}
+
+func cimdTestServer(t *testing.T, handler func(w http.ResponseWriter, r *http.Request, clientID string)) (*Server, string, *int32) {
+	t.Helper()
+	var hits int32
+	var clientID string
+	metadata := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		handler(w, r, clientID)
+	}))
+	t.Cleanup(metadata.Close)
+	clientID = metadata.URL + "/client.json"
+	instance := testServer(t)
+	client := metadata.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	instance.ClientMetadataClient = client
+	instance.Config.ClientIDMetadataEnabled = true
+	return instance, clientID, &hits
+}
+
+func goodDocument(w http.ResponseWriter, _ *http.Request, clientID string) {
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"client_id": clientID, "redirect_uris": []string{"http://127.0.0.1/callback"}, "token_endpoint_auth_method": "none",
+	})
+}
+
+func TestClientMetadataCacheServesSecondCall(t *testing.T) {
+	instance, clientID, hits := cimdTestServer(t, goodDocument)
+	now := time.Now()
+	instance.now = func() time.Time { return now }
+	for i := 0; i < 3; i++ {
+		client, err := instance.fetchClientMetadata(context.Background(), clientID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The redirect decision is made against the cached document each time.
+		if !instance.clientRedirectPermitted(client, "http://127.0.0.1:5555/callback") || instance.clientRedirectPermitted(client, "http://127.0.0.1:5555/other") {
+			t.Fatal("redirect_uri was not validated against the cached document")
+		}
+	}
+	if got := atomic.LoadInt32(hits); got != 1 {
+		t.Fatalf("metadata server hit %d times, want 1", got)
+	}
+	now = now.Add(clientMetadataDefaultTTL + time.Second)
+	if _, err := instance.fetchClientMetadata(context.Background(), clientID); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(hits); got != 2 {
+		t.Fatalf("after TTL expiry hits = %d, want 2", got)
+	}
+}
+
+func TestClientMetadataCacheDoesNotCacheFailures(t *testing.T) {
+	fail := int32(1)
+	instance, clientID, hits := cimdTestServer(t, func(w http.ResponseWriter, r *http.Request, id string) {
+		if atomic.LoadInt32(&fail) == 1 {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		goodDocument(w, r, id)
+	})
+	if _, err := instance.fetchClientMetadata(context.Background(), clientID); err == nil {
+		t.Fatal("expected failure")
+	}
+	atomic.StoreInt32(&fail, 0)
+	if _, err := instance.fetchClientMetadata(context.Background(), clientID); err != nil {
+		t.Fatalf("failure was cached: %v", err)
+	}
+	if got := atomic.LoadInt32(hits); got != 2 {
+		t.Fatalf("hits = %d, want 2", got)
+	}
+}
+
+func TestClientMetadataCacheHonoursCacheControl(t *testing.T) {
+	cases := map[string]time.Duration{
+		"":                     clientMetadataDefaultTTL,
+		"public, max-age=600":  10 * time.Minute,
+		"max-age=1":            clientMetadataMinTTL,
+		"max-age=999999":       clientMetadataMaxTTL,
+		"no-store":             0,
+		"max-age=0":            0,
+		"private, max-age=abc": clientMetadataDefaultTTL,
+	}
+	for header, want := range cases {
+		if got := clientMetadataTTL(header); got != want {
+			t.Errorf("clientMetadataTTL(%q) = %s, want %s", header, got, want)
+		}
+	}
+	instance, clientID, hits := cimdTestServer(t, func(w http.ResponseWriter, r *http.Request, id string) {
+		w.Header().Set("Cache-Control", "no-store")
+		goodDocument(w, r, id)
+	})
+	for i := 0; i < 2; i++ {
+		if _, err := instance.fetchClientMetadata(context.Background(), clientID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := atomic.LoadInt32(hits); got != 2 {
+		t.Fatalf("no-store document was cached: hits = %d", got)
+	}
+}
+
+func TestClientMetadataCacheCoalescesConcurrentFetches(t *testing.T) {
+	release := make(chan struct{})
+	instance, clientID, hits := cimdTestServer(t, func(w http.ResponseWriter, r *http.Request, id string) {
+		<-release
+		goodDocument(w, r, id)
+	})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := instance.fetchClientMetadata(context.Background(), clientID); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	time.Sleep(200 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	if got := atomic.LoadInt32(hits); got != 1 {
+		t.Fatalf("concurrent fetches hit the server %d times, want 1", got)
+	}
+}
+
+func TestClientMetadataCacheIsBounded(t *testing.T) {
+	cache := newClientMetadataCache(time.Now)
+	for i := 0; i < clientMetadataCacheSize*2; i++ {
+		cache.mu.Lock()
+		cache.store(strconv.Itoa(i), Client{ID: strconv.Itoa(i)}, time.Hour)
+		cache.mu.Unlock()
+	}
+	if len(cache.entries) > clientMetadataCacheSize {
+		t.Fatalf("cache holds %d entries, limit %d", len(cache.entries), clientMetadataCacheSize)
+	}
+}
+
+func TestAuthorizeClientMetadataRejectionAuditsDetail(t *testing.T) {
+	var output bytes.Buffer
+	config := Config{Issuer: "http://localhost:8080", Resources: []string{"http://localhost:8081/mcp"}, AccessTokenTTL: time.Minute, AllowedScopes: []string{"tools:read"}, LocalDevelopment: true, LocalSubject: "test-user", ClientIDMetadataEnabled: true}
+	instance, err := NewServer(config, NewMemoryStore(), LocalIdentityProvider{Subject: "test-user"}, nil, &output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "no", http.StatusTeapot) }))
+	defer metadata.Close()
+	client := metadata.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	instance.ClientMetadataClient = client
+	target := "/authorize?client_id=" + url.QueryEscape(metadata.URL+"/c.json") + "&redirect_uri=http%3A%2F%2F127.0.0.1%3A9%2Fcallback"
+	recorder := httptest.NewRecorder()
+	instance.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
+	logged := output.String()
+	if !strings.Contains(logged, `"reason":"client_metadata_rejected"`) || !strings.Contains(logged, `"detail":"client metadata document returned HTTP 418"`) {
+		t.Fatalf("audit event lacks the rejection detail: %s", logged)
 	}
 }
