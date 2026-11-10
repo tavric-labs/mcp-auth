@@ -5,6 +5,8 @@ Release notes for tagged versions are also published as
 
 ## Unreleased
 
+## [0.9.1] - 2026-11-10
+
 ### Fixed
 
 - Fetching a Client ID Metadata Document from a dual-stack host (for example
