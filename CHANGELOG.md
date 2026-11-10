@@ -5,6 +5,10 @@ Release notes for tagged versions are also published as
 
 ## Unreleased
 
+### Added
+
+- `docs/connector-architecture.md`: how connectors, login methods, resource logins and resource clients are loaded and used, with component and lifecycle diagrams, the files read at startup, failure behavior, how MCP Runtime supplies the files and a which-file-to-edit table. Linked from the README, the docs index and the site navigation.
+
 ## [0.9.0] - 2026-11-10
 
 ### Changed (behavior)
