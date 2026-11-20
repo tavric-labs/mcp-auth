@@ -103,6 +103,9 @@ func (p *OIDCIdentityProvider) Begin(_ context.Context, request IdentityRequest,
 	if p.Connector.requiresIDTokenNonce() {
 		values.Set("nonce", request.Nonce)
 	}
+	for key, value := range p.Connector.AuthorizationParams {
+		values.Set(key, value) // reserved names were rejected when the connector loaded
+	}
 	return p.Connector.AuthorizationEndpoint + "?" + values.Encode(), codeVerifier, nil
 }
 

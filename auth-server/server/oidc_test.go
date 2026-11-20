@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -440,5 +442,93 @@ func TestPKCECanOnlyBeDisabledForAConnectorWithAClientSecret(t *testing.T) {
 	public.ClientSecretEnv = ""
 	if err := public.validate("c", false); err == nil {
 		t.Error("PKCE was disabled for a public client, which has nothing else to bind the code to")
+	}
+}
+
+// Google issues a refresh token only when the authorization request carries
+// access_type=offline. A connector can name such provider parameters.
+func TestOIDCBeginSendsTheConnectorsAuthorizationParams(t *testing.T) {
+	t.Setenv("TEST_PKCE_SECRET", "secret")
+	connector := pkceConnector("client_secret_post", nil, "https://upstream.example.com/token")
+	connector.AuthorizationParams = map[string]string{"access_type": "offline", "prompt": "consent", "login_hint": "a b&c=d"}
+	provider, err := NewOIDCIdentityProvider(connector, "http://localhost:8080/identity/callback", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	location, _, err := provider.Begin(context.Background(), IdentityRequest{Nonce: "n"}, "state-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	query, _ := url.Parse(location)
+	q := query.Query()
+	if q.Get("access_type") != "offline" || q.Get("prompt") != "consent" || q.Get("login_hint") != "a b&c=d" {
+		t.Fatalf("params missing or mangled: %s", location)
+	}
+	// The server's own parameters are still there and single-valued.
+	for _, key := range []string{"response_type", "client_id", "redirect_uri", "scope", "state", "nonce", "code_challenge", "code_challenge_method"} {
+		if len(q[key]) != 1 || q.Get(key) == "" {
+			t.Errorf("%s = %v in %s", key, q[key], location)
+		}
+	}
+	if q.Get("state") != "state-1" || q.Get("response_type") != "code" {
+		t.Fatalf("a server parameter changed: %s", location)
+	}
+}
+
+func TestOIDCBeginSendsNothingExtraWithoutAuthorizationParams(t *testing.T) {
+	t.Setenv("TEST_PKCE_SECRET", "secret")
+	provider, err := NewOIDCIdentityProvider(pkceConnector("client_secret_post", nil, "https://upstream.example.com/token"), "http://localhost:8080/identity/callback", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	location, _, _ := provider.Begin(context.Background(), IdentityRequest{Nonce: "n"}, "state-1")
+	query, _ := url.Parse(location)
+	if query.Query().Has("access_type") || query.Query().Has("prompt") {
+		t.Fatalf("unexpected provider parameter: %s", location)
+	}
+}
+
+func TestConnectorsRejectUnsafeAuthorizationParams(t *testing.T) {
+	t.Setenv("TEST_PKCE_SECRET", "secret")
+	many := map[string]string{}
+	for _, k := range []string{"a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9"} {
+		many[k] = "x"
+	}
+	for name, params := range map[string]map[string]string{
+		"reserved state":        {"state": "x"},
+		"reserved redirect_uri": {"redirect_uri": "https://evil.example/cb"},
+		"reserved scope":        {"scope": "openid"},
+		"reserved challenge":    {"code_challenge": "x"},
+		"reserved nonce":        {"nonce": "x"},
+		"bad name uppercase":    {"Access_Type": "offline"},
+		"bad name symbol":       {"a&b": "x"},
+		"empty name":            {"": "x"},
+		"empty value":           {"prompt": ""},
+		"control char":          {"prompt": "a\nb"},
+		"too long":              {"prompt": strings.Repeat("x", maxAuthorizationParamValue+1)},
+		"too many":              many,
+	} {
+		connector := pkceConnector("client_secret_post", nil, "https://upstream.example.com/token")
+		connector.AuthorizationParams = params
+		if _, err := NewOIDCIdentityProvider(connector, "http://localhost:8080/identity/callback", true); err == nil {
+			t.Errorf("%s: accepted %v", name, params)
+		}
+	}
+}
+
+func TestAuthorizationParamsLoadFromTheConnectorsFile(t *testing.T) {
+	t.Setenv("G_ID", "client")
+	t.Setenv("G_SECRET", "secret")
+	path := filepath.Join(t.TempDir(), "connectors.json")
+	body := `{"google":{"issuer":"https://accounts.google.com","authorization_endpoint":"https://accounts.google.com/o/oauth2/v2/auth","token_endpoint":"https://oauth2.googleapis.com/token","jwks_uri":"https://www.googleapis.com/oauth2/v3/certs","client_id_env":"G_ID","client_secret_env":"G_SECRET","token_endpoint_auth_method":"client_secret_post","exchange_client_id":"unused","scopes":["openid","https://www.googleapis.com/auth/youtube.force-ssl"],"authorization_params":{"access_type":"offline","prompt":"consent"}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	connectors, err := LoadConnectors(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := connectors["google"].AuthorizationParams; got["access_type"] != "offline" || got["prompt"] != "consent" {
+		t.Fatalf("authorization_params = %v", got)
 	}
 }

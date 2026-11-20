@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 )
 
@@ -81,6 +82,14 @@ type ConnectorConfig struct {
 	// IDTokenNoncePolicy defaults to "required". Set "disabled" only for an
 	// upstream provider whose documented ID-token claims omit nonce.
 	IDTokenNoncePolicy string `json:"id_token_nonce_policy"`
+	// AuthorizationParams are extra query parameters sent on the upstream
+	// authorization request, for a provider that needs one to behave as the
+	// connector requires. Google, for example, only issues a refresh token when
+	// the request carries access_type=offline (and, for a person who already
+	// consented, prompt=consent). Parameters the server sets itself
+	// (response_type, client_id, redirect_uri, scope, state, nonce and the PKCE
+	// pair) cannot be set or overridden here.
+	AuthorizationParams map[string]string `json:"authorization_params"`
 	// Consent customizes the browser consent page. When omitted, the server
 	// renders its built-in page. website_url and support_url must be absolute
 	// https URLs when set.
@@ -165,6 +174,9 @@ func (c ConnectorConfig) validate(name string, allowInsecure bool) error {
 	if c.IDTokenNoncePolicy != "" && c.IDTokenNoncePolicy != "required" && c.IDTokenNoncePolicy != "disabled" {
 		return fmt.Errorf("connector %q has unsupported id_token_nonce_policy", name)
 	}
+	if err := validateAuthorizationParams(name, c.AuthorizationParams); err != nil {
+		return err
+	}
 	for _, algorithm := range c.AllowedAlgorithms {
 		if !validAlgorithm(algorithm) {
 			return fmt.Errorf("connector %q has an unsupported allowed_algorithms entry %q", name, algorithm)
@@ -187,6 +199,44 @@ func (c ConnectorConfig) validate(name string, allowInsecure bool) error {
 	}
 	if err := c.Consent.validate(name); err != nil {
 		return err
+	}
+	return nil
+}
+
+// reservedAuthorizationParams are set by the server on every upstream
+// authorization request. Letting a connector change them would break the
+// state, PKCE and redirect bindings the callback relies on.
+var reservedAuthorizationParams = map[string]bool{
+	"response_type": true, "client_id": true, "redirect_uri": true, "scope": true,
+	"state": true, "nonce": true, "code_challenge": true, "code_challenge_method": true,
+}
+
+var authorizationParamName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,39}$`)
+
+const (
+	maxAuthorizationParams     = 8
+	maxAuthorizationParamValue = 200
+)
+
+func validateAuthorizationParams(name string, params map[string]string) error {
+	if len(params) > maxAuthorizationParams {
+		return fmt.Errorf("connector %q has more than %d authorization_params", name, maxAuthorizationParams)
+	}
+	for key, value := range params {
+		if !authorizationParamName.MatchString(key) {
+			return fmt.Errorf("connector %q has an invalid authorization_params name %q (lowercase letters, digits and underscores)", name, key)
+		}
+		if reservedAuthorizationParams[key] {
+			return fmt.Errorf("connector %q cannot set authorization_params %q: the server sets it", name, key)
+		}
+		if value == "" || len(value) > maxAuthorizationParamValue {
+			return fmt.Errorf("connector %q has an invalid authorization_params value for %q (1 to %d characters)", name, key, maxAuthorizationParamValue)
+		}
+		for _, r := range value {
+			if r < 0x20 || r == 0x7f {
+				return fmt.Errorf("connector %q has a control character in authorization_params %q", name, key)
+			}
+		}
 	}
 	return nil
 }
