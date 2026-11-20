@@ -5,6 +5,17 @@ Release notes for tagged versions are also published as
 
 ## Unreleased
 
+### Added
+
+- Connectors accept `authorization_params`, extra query parameters sent on the
+  upstream authorization request. Google only issues a refresh token when the
+  request carries `access_type=offline`, so a Google connector can now set
+  `{"access_type": "offline", "prompt": "consent"}` and `upstream_session` can
+  refresh the person's token instead of ending the session after about an hour.
+  At most 8 parameters; the parameters the server sets itself (`response_type`,
+  `client_id`, `redirect_uri`, `scope`, `state`, `nonce`, `code_challenge`,
+  `code_challenge_method`) are rejected when the connector loads.
+
 ## [0.9.1] - 2026-11-10
 
 ### Fixed

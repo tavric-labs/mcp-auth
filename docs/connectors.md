@@ -137,6 +137,7 @@ rejected; use `client_secret_env`. All URLs must be `https` unless
 | `allowed_algorithms` | string list | no | `["RS256"]` | ID token algorithms: `RS256`, `PS256`, `ES256`. |
 | `identity_claims` | string list | no | `["sub"]` | Claims tried in order for the subject; userinfo is called when none is present. |
 | `downstream_token_strategy` | string | no | `upstream_session` | `upstream_session` or `rfc8693`. Single-connector mode only. |
+| `authorization_params` | string map | no | none | Extra query parameters for the provider's authorization request, up to 8, for example `{"access_type": "offline", "prompt": "consent"}` for Google. Names are lowercase letters, digits and underscores. The parameters the server sets itself (`response_type`, `client_id`, `redirect_uri`, `scope`, `state`, `nonce`, `code_challenge`, `code_challenge_method`) are rejected. |
 | `allowed_upstream_callback_uris` | URL list | no | any | Which of this server's `/identity/callback` URLs may be registered with the provider. |
 | `allowed_client_redirect_uris` | URL list | no | any | Restricts MCP client redirect URIs. Single-connector mode only. |
 | `consent` | object | no | built-in page | Consent page text: `display_name`, `website_url`, `page_title`, `subtitle`, `intro_paragraphs`, `permissions`, `scope_labels`, `upstream_sso_label`, `support_url`. Single-connector mode only. |
@@ -561,3 +562,22 @@ registry, err := NewLoginRegistry(LoginEntry{
 | Upstream session keeping and refresh | `upstream_session.go` |
 | Resource clients, external credentials | `resource_clients.go`, `external_credentials.go` |
 | Startup wiring | `auth-server/application/application.go` |
+
+## Google: getting a refresh token
+
+Google issues a refresh token only when the authorization request carries
+`access_type=offline`. Without it a sign-in works, but the upstream access token
+lasts about an hour and `upstream_session` cannot refresh it, so the person has to
+sign in again. Add the parameter to the connector:
+
+```json
+"authorization_params": {"access_type": "offline", "prompt": "consent"}
+```
+
+`prompt=consent` makes Google show the consent screen again, which it needs in
+order to issue a refresh token to a person who already granted access earlier.
+Drop it once every person has a refresh token if you prefer fewer prompts.
+Google may still withhold a refresh token, for example after many tokens were
+issued for the same client and person, or in a project whose consent screen is in
+Testing mode (tokens expire after 7 days). Check Google's current documentation.
+
