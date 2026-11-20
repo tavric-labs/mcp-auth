@@ -5,6 +5,8 @@ Release notes for tagged versions are also published as
 
 ## Unreleased
 
+## [0.10.0] - 2026-11-20
+
 ### Added
 
 - Connectors accept `authorization_params`, extra query parameters sent on the
